@@ -1,0 +1,187 @@
+diff --git a/include/moderngekko/runtime.hpp b/include/moderngekko/runtime.hpp
+index 0adc855..7170b1e 100644
+--- a/include/moderngekko/runtime.hpp
++++ b/include/moderngekko/runtime.hpp
+@@ -3,6 +3,7 @@
+ #include "moderngekko/game.hpp"
+ #include "moderngekko/module_abi.h"
+ 
++#include <cstdint>
+ #include <filesystem>
+ #include <memory>
+ #include <optional>
+@@ -143,6 +144,18 @@ private:
+   void StopAutomation();
+   std::unique_ptr<Impl> m_impl;
+ };
++
++// RumbleRecomp: move saves between this runtime's emulated NAND and the Wii's own
++// save format (the data.bin a real Wii writes to SD via Data Management). Both run
++// without booting a game; they must not be called while a Runtime is active.
++// ImportWiiSave overwrites an existing save for the same title.
++std::optional<RuntimeError> ImportWiiSave(const std::filesystem::path& user_directory,
++                                          const std::filesystem::path& data_bin);
++// Writes <output_directory>/private/wii/title/<gamecode>/data.bin, the layout the Wii
++// expects on an SD card.
++std::optional<RuntimeError> ExportWiiSave(const std::filesystem::path& user_directory,
++                                          std::uint64_t title_id,
++                                          const std::filesystem::path& output_directory);
+ }  // namespace moderngekko
+ 
+ namespace ModernGekko = moderngekko;
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 73aaa68..3b94238 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -22,6 +22,7 @@
+ #include "DolphinNoGUI/Platform.h"
+ #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
+ #include "UICommon/UICommon.h"
++#include "Core/HW/WiiSave.h"
+ #include "VideoCommon/FrameDumper.h"
+ #include "VideoCommon/PerformanceMetrics.h"
+ #include "VideoCommon/VideoEvents.h"
+@@ -557,6 +558,75 @@ static bool StderrMsgAlertHandler(const char *caption, const char *text,
+   return true;
+ }
+ 
++namespace {
++const char *DescribeCopyResult(WiiSave::CopyResult result) {
++  switch (result) {
++  case WiiSave::CopyResult::Success: return "success";
++  case WiiSave::CopyResult::Cancelled: return "cancelled";
++  case WiiSave::CopyResult::CorruptedSource: return "the save file is corrupted or not a Wii save";
++  case WiiSave::CopyResult::TitleMissing: return "no save exists for that title";
++  default: return "the save could not be copied";
++  }
++}
++
++// Runs `op` with Dolphin's config and user paths set up for `user_directory`, outside a
++// Runtime (WiiSave builds its own IOS kernel over the NAND in that directory).
++template <typename Op>
++std::optional<RuntimeError> WithUserDirectory(const std::filesystem::path &user_directory,
++                                              Op &&op) {
++  if (s_runtime_active)
++    return RuntimeError{RuntimeErrorCode::AlreadyActive,
++                        "save transfer cannot run while the game is running"};
++  UICommon::SetUserDirectory(user_directory.string());
++  UICommon::Init();
++  std::optional<RuntimeError> error = op();
++  UICommon::Shutdown();
++  return error;
++}
++}  // namespace
++
++std::optional<RuntimeError> ImportWiiSave(const std::filesystem::path &user_directory,
++                                          const std::filesystem::path &data_bin) {
++  if (!std::filesystem::is_regular_file(data_bin))
++    return RuntimeError{RuntimeErrorCode::InvalidState,
++                        "save file not found: " + data_bin.string()};
++  // WiiSave::Import cannot create a title's data directory: on a Wii it exists from
++  // install time, but here it only appears on the game's first boot. Create it for
++  // every installed title (one with content/) that lacks one, so a save can be imported
++  // before the game is ever started.
++  std::error_code ec;
++  const auto titles = user_directory / "Wii" / "title";
++  for (const auto &kind : std::filesystem::directory_iterator(titles, ec)) {
++    for (const auto &title : std::filesystem::directory_iterator(kind.path(), ec)) {
++      if (std::filesystem::is_directory(title.path() / "content", ec))
++        std::filesystem::create_directories(title.path() / "data", ec);
++    }
++  }
++  return WithUserDirectory(user_directory, [&]() -> std::optional<RuntimeError> {
++    const auto result = WiiSave::Import(data_bin.string(), [] { return true; });
++    if (result != WiiSave::CopyResult::Success)
++      return RuntimeError{RuntimeErrorCode::InvalidState,
++                          std::string("save import failed: ") + DescribeCopyResult(result)};
++    return std::nullopt;
++  });
++}
++
++std::optional<RuntimeError> ExportWiiSave(const std::filesystem::path &user_directory,
++                                          std::uint64_t title_id,
++                                          const std::filesystem::path &output_directory) {
++  const char code[5] = {static_cast<char>(title_id >> 24), static_cast<char>(title_id >> 16),
++                        static_cast<char>(title_id >> 8), static_cast<char>(title_id), 0};
++  std::error_code ec;
++  std::filesystem::create_directories(output_directory / "private" / "wii" / "title" / code, ec);
++  return WithUserDirectory(user_directory, [&]() -> std::optional<RuntimeError> {
++    const auto result = WiiSave::Export(title_id, output_directory.string());
++    if (result != WiiSave::CopyResult::Success)
++      return RuntimeError{RuntimeErrorCode::InvalidState,
++                          std::string("save export failed: ") + DescribeCopyResult(result)};
++    return std::nullopt;
++  });
++}
++
+ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   Common::RegisterMsgAlertHandler(&StderrMsgAlertHandler);
+   std::lock_guard lock(s_runtime_mutex);
+diff --git a/tools/moderngekko_run.cpp b/tools/moderngekko_run.cpp
+index 722bd6d..0e38c33 100644
+--- a/tools/moderngekko_run.cpp
++++ b/tools/moderngekko_run.cpp
+@@ -150,6 +150,9 @@ int RunMain(int argc, char **argv) {
+   std::string netplay_nickname;
+   std::string netplay_buffer;
+   std::vector<std::string> netplay_controllers;
++  // RumbleRecomp: Wii save transfer (see moderngekko::ImportWiiSave/ExportWiiSave).
++  std::filesystem::path import_wii_save;
++  std::filesystem::path export_wii_save;
+   for (int i = 1; i < argc; ++i) {
+     const std::string arg = argv[i];
+     const auto value = [&](const char *option) -> const char * {
+@@ -167,6 +170,10 @@ int RunMain(int argc, char **argv) {
+       config.user_directory = value("--user-dir");
+     else if (arg == "--title")
+       config.window_title = value("--title");
++    else if (arg == "--import-wii-save")
++      import_wii_save = StringToPath(value("--import-wii-save"));
++    else if (arg == "--export-wii-save")
++      export_wii_save = StringToPath(value("--export-wii-save"));
+     else if (arg == "--load-state")
+     {
+       // Checked here rather than left to the boot path: a state that is not
+@@ -236,6 +243,14 @@ int RunMain(int argc, char **argv) {
+       return 2;
+     }
+   }
++  if (!import_wii_save.empty()) {
++    if (const auto error = moderngekko::ImportWiiSave(config.user_directory, import_wii_save)) {
++      std::cerr << error->message << '\n';
++      return 1;
++    }
++    std::cout << "imported Wii save " << PathToString(import_wii_save) << '\n';
++    return 0;
++  }
+   if (config.game_root.empty())
+     config.game_root =
+         ReadDefaultGame(config.user_directory, executable_directory);
+@@ -291,6 +306,27 @@ int RunMain(int argc, char **argv) {
+     std::cerr << "invalid game: " << inspected.error << '\n';
+     return 2;
+   }
++  if (!export_wii_save.empty()) {
++    // The game code is the first four characters of the disc ID. WiiWare saves live
++    // under title type 00010001, disc games under 00010000; try both.
++    const std::string& id = inspected.metadata->disc_id;
++    const std::uint64_t code = (std::uint64_t(std::uint8_t(id[0])) << 24) |
++                               (std::uint64_t(std::uint8_t(id[1])) << 16) |
++                               (std::uint64_t(std::uint8_t(id[2])) << 8) | std::uint8_t(id[3]);
++    std::optional<moderngekko::RuntimeError> error;
++    for (const std::uint64_t kind : {0x00010001ull, 0x00010000ull}) {
++      error = moderngekko::ExportWiiSave(config.user_directory, (kind << 32) | code,
++                                         export_wii_save);
++      if (!error)
++        break;
++    }
++    if (error) {
++      std::cerr << error->message << '\n';
++      return 1;
++    }
++    std::cout << "exported Wii save to " << PathToString(export_wii_save) << '\n';
++    return 0;
++  }
+ 
+ #ifdef MODERNGEKKO_REQUIRED_DISC_ID
+   if (inspected.metadata->disc_id != MODERNGEKKO_REQUIRED_DISC_ID) {

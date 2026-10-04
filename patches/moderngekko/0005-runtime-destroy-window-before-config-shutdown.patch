@@ -1,0 +1,24 @@
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index 3758d0e..4ef7673 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -745,10 +745,18 @@ Runtime::~Runtime() {
+   m_impl->state_hook = {};
+   if (m_impl->controllers_initialized)
+     UICommon::ShutdownControllers();
++  // RumbleRecomp: destroy the render window while Config is still alive.
++  // DestroyWindow re-enters the WndProc (WM_KILLFOCUS writes Config), and
++  // UICommon::Shutdown() clears the Config layers; the old order crashed with
++  // STATUS_FATAL_USER_CALLBACK_EXCEPTION whenever the window had focus.
++  {
++    std::lock_guard lock(s_runtime_mutex);
++    s_platform = nullptr;
++  }
++  m_impl->platform.reset();
+   if (m_impl->ui_initialized)
+     UICommon::Shutdown();
+   std::lock_guard lock(s_runtime_mutex);
+-  s_platform = nullptr;
+   s_window_title.clear();
+   s_show_fps_in_title = true;
+   s_runtime_active = false;

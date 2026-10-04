@@ -1,0 +1,138 @@
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -20,9 +20,16 @@
+ #include "Core/State.h"
+ #include "Core/System.h"
+ #include "DolphinNoGUI/Platform.h"
++#include "InputCommon/ControllerInterface/ControllerInterface.h"
+ #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
+ #include "UICommon/UICommon.h"
+ #include "Core/HW/WiiSave.h"
++#include "Core/HW/GCPad.h"
++#include "Core/HW/Wiimote.h"
++#include "Core/Core.h"
++#include "InputCommon/ControllerEmu/ControllerEmu.h"
++#include "InputCommon/InputConfig.h"
++#include "VideoCommon/OnScreenDisplay.h"
+ #include "VideoCommon/FrameDumper.h"
+ #include "VideoCommon/PerformanceMetrics.h"
+ #include "VideoCommon/VideoEvents.h"
+@@ -399,9 +406,110 @@
+   }
+ }
+ 
++// RumbleRecomp: RR_LOG_INPUT=1 writes <automation-dir>/inputs.txt with every input device
++// Dolphin sees, the names of all its controls (what WiimoteNew.ini/GCPadNew.ini mappings
++// must match), and which of them are active right now. Diagnoses "my controller does nothing".
++void WriteInputDiagnostics(const std::filesystem::path& root)
++{
++  static const bool enabled = [] {
++    const char* v = std::getenv("RR_LOG_INPUT");
++    return v && v[0] == '1';
++  }();
++  if (!enabled)
++    return;
++  std::ostringstream out;
++  for (const std::string& name : g_controller_interface.GetAllDeviceStrings())
++  {
++    ciface::Core::DeviceQualifier q;
++    q.FromString(name);
++    const auto device = g_controller_interface.FindDevice(q);
++    if (!device)
++      continue;
++    std::string active, all;
++    for (const auto* input : device->Inputs())
++    {
++      all += input->GetName() + "|";
++      const double state = input->GetState();
++      if (state > 0.5)
++        active += " [" + input->GetName() + "]";
++    }
++    out << "device " << name << "\n  active:" << (active.empty() ? " -" : active)
++        << "\n  controls: " << all << "\n";
++  }
++  const std::filesystem::path tmp = root / "inputs.tmp";
++  {
++    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
++    f << out.str();
++  }
++  std::error_code ec;
++  std::filesystem::rename(tmp, root / "inputs.txt", ec);
++}
++
++// RumbleRecomp: press-to-join player assignment (RR_PRESS_TO_JOIN=1, set by the launcher).
++// Player 1 is Wii Remote 1 (keyboard always bound; the first gamepad that presses a button is
++// added), players 2-4 are GameCube pad ports 2-4 (what the game's local multiplayer reads).
++// The launcher writes those mappings with unqualified gamepad control names ("Button S"), which
++// resolve against each controller's default device, so assigning a player is just setting
++// that default device. Only SDL devices are considered (XInput/DInput expose the same physical
++// pads a second time). A disconnected controller keeps its slot and gets it back on reconnect.
++void UpdatePressToJoin()
++{
++  static const bool enabled = [] {
++    const char* v = std::getenv("RR_PRESS_TO_JOIN");
++    return v && v[0] == '1';
++  }();
++  if (!enabled)
++    return;
++  static std::vector<std::string> assigned;
++  if (assigned.size() >= 4)
++    return;
++  for (const std::string& name : g_controller_interface.GetAllDeviceStrings())
++  {
++    if (name.rfind("SDL/", 0) != 0 ||
++        std::find(assigned.begin(), assigned.end(), name) != assigned.end())
++      continue;
++    ciface::Core::DeviceQualifier q;
++    q.FromString(name);
++    const auto device = g_controller_interface.FindDevice(q);
++    if (!device)
++      continue;
++    bool pressed = false;
++    for (const auto* input : device->Inputs())
++    {
++      const std::string n = input->GetName();
++      if ((n.rfind("Button ", 0) == 0 || n.rfind("Pad ", 0) == 0 || n == "Start") &&
++          input->GetState() > 0.5)
++      {
++        pressed = true;
++        break;
++      }
++    }
++    if (!pressed)
++      continue;
++    assigned.push_back(name);
++    const int slot = static_cast<int>(assigned.size()) - 1;
++    {
++      const auto lock = ControllerEmu::EmulatedController::GetStateLock();
++      ControllerEmu::EmulatedController* controller =
++          slot == 0 ? Wiimote::GetConfig()->GetController(0) : Pad::GetConfig()->GetController(slot);
++      if (controller)
++      {
++        controller->SetDefaultDevice(name);
++        controller->UpdateReferences(g_controller_interface);
++      }
++    }
++    OSD::AddMessage(fmt::format("Player {} joined: {}", slot + 1, name.substr(name.rfind('/') + 1)),
++                    4000);
++    std::fprintf(stderr, "[input] player %d -> %s\n", slot + 1, name.c_str());
++    if (assigned.size() >= 4)
++      return;
++  }
++}
++
+ template <typename ImplT>
+ void WriteAutomationStatus(const std::filesystem::path& root, ImplT& impl)
+ {
++  WriteInputDiagnostics(root);
+   automation::Status status;
+   const auto core_state = impl.booted ? Core::GetState(Core::System::GetInstance())
+                                       : Core::State::Uninitialized;
+@@ -488,6 +596,7 @@
+       MoveAutomationCommand(command_path, root, "processed");
+     }
+ 
++    UpdatePressToJoin();
+     const auto now = std::chrono::steady_clock::now();
+     if (now >= next_status_write)
+     {

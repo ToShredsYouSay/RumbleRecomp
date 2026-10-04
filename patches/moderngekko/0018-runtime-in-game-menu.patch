@@ -1,0 +1,1120 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -241,6 +241,7 @@
+ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+     target_sources(moderngekko PRIVATE
+         src/runtime/dolphin_runtime.cpp
++        src/runtime/rumble_menu.cpp
+         tools/automation_protocol.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
+@@ -280,7 +281,7 @@
+     else()
+         target_compile_definitions(moderngekko PRIVATE _M_GENERIC=1)
+     endif()
+-    target_link_libraries(moderngekko PRIVATE core uicommon)
++    target_link_libraries(moderngekko PRIVATE core uicommon imgui)
+     if(TARGET PkgConfig::X11)
+         target_sources(moderngekko PRIVATE
+             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformX11.cpp)
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -39,6 +39,7 @@
+ #include "moderngekko/cpu_state.h"
+ #include "moderngekko/mod_loader.hpp"
+ #include "moderngekko/module_loader.hpp"
++#include "rumble_menu.hpp"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -352,6 +353,9 @@
+     if (auto error = WriteAutomationMemory(command.address, command.data))
+       return error;
+     break;
++  case automation::CommandType::MenuKey:
++    menu::PushKey(command.menu_key);
++    break;
+   case automation::CommandType::Stop:
+     runtime.RequestStop();
+     break;
+@@ -372,6 +376,7 @@
+   case automation::CommandType::ReadMemory:
+   case automation::CommandType::WriteMemory:
+   case automation::CommandType::PadFrames:
++  case automation::CommandType::MenuKey:
+     return true;
+   case automation::CommandType::Pad:
+   case automation::CommandType::ClearPad:
+@@ -1008,6 +1013,17 @@
+         if (state == Core::State::Uninitialized && m_impl->platform)
+           m_impl->platform->Stop();
+       });
++  // RumbleRecomp: in-game menu (HOME or Escape); save states per game version.
++  const bool menu = !m_impl->config.headless;
++  if (menu)
++  {
++    // RR_MENU_SLOTS (set by the launcher) names the version, as Weekend and PATCH1 share a game folder.
++    const char* slots = std::getenv("RR_MENU_SLOTS");
++    menu::Install(m_impl->config.user_directory / "StateSaves" / "RumbleRecomp" /
++                      (slots && *slots ? std::filesystem::path(slots) :
++                                         m_impl->config.game_root.filename()),
++                  m_impl->platform.get());
++  }
+   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot),
+                              m_impl->platform->GetWindowSystemInfo())) {
+     m_impl->running = false;
+@@ -1016,6 +1032,8 @@
+                          "Dolphin could not boot sys/main.dol"}};
+   }
+   m_impl->booted = true;
++  if (menu)
++    menu::Start();
+   m_impl->present_hook =
+       GetVideoEvents().after_present_event.Register([this](const PresentInfo &info) {
+         m_impl->automation_state.frame_count.store(info.frame_count,
+@@ -1040,6 +1058,8 @@
+     });
+   }
+   m_impl->platform->MainLoop();
++  if (menu)
++    menu::Stop();
+   title_thread.request_stop();
+   if (title_thread.joinable())
+     title_thread.join();
+--- a/tools/automation_protocol.hpp
++++ b/tools/automation_protocol.hpp
+@@ -23,6 +23,7 @@
+   Screenshot,
+   ReadMemory,
+   WriteMemory,
++  MenuKey,
+   Stop,
+ };
+ 
+@@ -43,6 +44,7 @@
+   std::uint32_t size = 0;
+   std::uint32_t frames = 0;
+   std::vector<std::uint8_t> data;
++  int menu_key = 0;  // RumbleRecomp: menu_key key=escape|up|down|left|right|enter|back
+ };
+ 
+ struct Status
+--- a/tools/automation_protocol.cpp
++++ b/tools/automation_protocol.cpp
+@@ -192,6 +192,8 @@
+     return CommandType::ReadMemory;
+   if (text == "write_memory")
+     return CommandType::WriteMemory;
++  if (text == "menu_key")
++    return CommandType::MenuKey;
+   if (text == "stop")
+     return CommandType::Stop;
+   return std::nullopt;
+@@ -518,6 +520,23 @@
+     if (!ParseWriteMemoryCommand(values, &parsed, error))
+       return false;
+     break;
++  case CommandType::MenuKey:
++  {
++    // Windows virtual-key codes, as the game window passes them to the in-game menu.
++    static const std::map<std::string, int, std::less<>> keys = {
++        {"escape", 0x1B}, {"up", 0x26}, {"down", 0x28}, {"left", 0x25},
++        {"right", 0x27},  {"enter", 0x0D}, {"back", 0x08}};
++    const auto key_it = values.find("key");
++    const auto found = key_it == values.end() ? keys.end() : keys.find(Trim(key_it->second));
++    if (found == keys.end())
++    {
++      if (error)
++        *error = "menu_key requires key=escape|up|down|left|right|enter|back";
++      return false;
++    }
++    parsed.menu_key = found->second;
++    break;
++  }
+   case CommandType::Pause:
+   case CommandType::Resume:
+   case CommandType::Stop:
+--- /dev/null
++++ b/src/runtime/rumble_menu.hpp
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <filesystem>
++
++class Platform;
++
++// RumbleRecomp: in-game menu, opened with a controller's HOME (Guide) button, both sticks pressed in, the
++// touchpad click, or Escape. It pauses the
++// game and offers Resume, save state and load state slots with thumbnails, a fullscreen toggle and
++// Quit game.
++namespace moderngekko::menu
++{
++// Installs the drawing hooks. Call before the video backend starts (before booting).
++void Install(std::filesystem::path state_directory, Platform* platform);
++// Starts reading input once the game is running. Stop() ends it.
++void Start();
++void Stop();
++// Feeds a key to the menu as if pressed in the game window (Windows virtual-key code). Used by
++// automation, so tests need neither real key presses nor window focus.
++void PushKey(int vk);
++}  // namespace moderngekko::menu
+--- /dev/null
++++ b/src/runtime/rumble_menu.cpp
+@@ -0,0 +1,957 @@
++// RumbleRecomp: in-game menu (see rumble_menu.hpp).
++//
++// Threads: the window thread queues key presses (Platform::key_hook); a menu thread reads controllers,
++// pauses and resumes the game and runs the actions; the video thread draws the menu inside Dolphin's
++// ImGui frame (OnScreenUI::custom_draw) and owns the thumbnail textures. While the menu is open the
++// game is paused, so the menu thread asks the video thread to redraw the last game frame ~60 times a
++// second (AsyncRequests events still run while paused).
++
++#include "rumble_menu.hpp"
++
++#include "Common/FileUtil.h"
++#include "Core/Core.h"
++#include "Core/Host.h"
++#include "Core/State.h"
++#include "Core/System.h"
++#include "DolphinNoGUI/Platform.h"
++#include "InputCommon/ControllerInterface/ControllerInterface.h"
++#include "VideoCommon/AbstractGfx.h"
++#include "VideoCommon/AbstractStagingTexture.h"
++#include "VideoCommon/AbstractTexture.h"
++#include "VideoCommon/AsyncRequests.h"
++#include "VideoCommon/OnScreenUI.h"
++#include "VideoCommon/Present.h"
++#include "VideoCommon/TextureConfig.h"
++
++#include <imgui.h>
++
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cctype>
++#include <cstring>
++#include <ctime>
++#include <deque>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
++namespace moderngekko::menu
++{
++namespace
++{
++using Clock = std::chrono::steady_clock;
++
++constexpr int SLOTS = 4;
++constexpr u32 THUMB_WIDTH = 480;
++
++enum class Page
++{
++  Main,
++  Save,
++  Load,
++};
++enum MainItem
++{
++  ITEM_RESUME,
++  ITEM_SAVE,
++  ITEM_LOAD,
++  ITEM_FULLSCREEN,
++  ITEM_QUIT,
++  ITEM_COUNT,
++};
++
++struct Image
++{
++  std::vector<u8> rgba;
++  u32 width = 0;
++  u32 height = 0;
++};
++
++struct Slot
++{
++  bool exists = false;
++  std::string when;
++  Image thumb;
++  bool dirty = false;  // thumb changed, the video thread re-uploads it
++  std::unique_ptr<AbstractTexture> texture;
++};
++
++struct MenuState
++{
++  std::mutex mutex;
++  std::atomic<bool> open = false;
++  Page page = Page::Main;
++  int item = ITEM_RESUME;
++  int slot = 0;
++  std::array<Slot, SLOTS> slots;
++  Image frame;  // the game frame when the menu opened: the thumbnail for a new save
++  std::string toast;
++  Clock::time_point toast_until;
++  bool fullscreen = false;
++};
++
++MenuState g;
++std::filesystem::path s_dir;
++Platform* s_platform = nullptr;
++std::jthread s_thread;
++std::atomic<bool> s_redraw_pending = false;
++std::mutex s_keys_mutex;
++std::deque<int> s_keys;  // virtual-key codes from the game window
++ImFont* s_font = nullptr;
++ImFont* s_font_bold = nullptr;
++
++std::filesystem::path SlotPath(int slot, const char* ext)
++{
++  return s_dir / ("slot" + std::to_string(slot + 1) + ext);
++}
++
++// ---- thumbnails --------------------------------------------------------------------------------
++
++Image Downscale(const std::vector<u8>& src, u32 sw, u32 sh, u32 tw, u32 th, bool bgra)
++{
++  Image out;
++  out.width = tw;
++  out.height = th;
++  out.rgba.resize(static_cast<size_t>(tw) * th * 4);
++  for (u32 y = 0; y < th; ++y)
++  {
++    const u32 y0 = y * sh / th, y1 = std::max(y0 + 1, (y + 1) * sh / th);
++    for (u32 x = 0; x < tw; ++x)
++    {
++      const u32 x0 = x * sw / tw, x1 = std::max(x0 + 1, (x + 1) * sw / tw);
++      u32 sum[3] = {};
++      for (u32 sy = y0; sy < y1; ++sy)
++      {
++        const u8* p = &src[(static_cast<size_t>(sy) * sw + x0) * 4];
++        for (u32 sx = x0; sx < x1; ++sx, p += 4)
++        {
++          sum[0] += p[0];
++          sum[1] += p[1];
++          sum[2] += p[2];
++        }
++      }
++      const u32 n = (y1 - y0) * (x1 - x0);
++      u8* d = &out.rgba[(static_cast<size_t>(y) * tw + x) * 4];
++      d[0] = static_cast<u8>(sum[bgra ? 2 : 0] / n);
++      d[1] = static_cast<u8>(sum[1] / n);
++      d[2] = static_cast<u8>(sum[bgra ? 0 : 2] / n);
++      d[3] = 255;
++    }
++  }
++  return out;
++}
++
++// Video thread: read the last game frame back and shrink it to a thumbnail with the shape it has on
++// screen (the frame buffer itself is not stored at the displayed aspect ratio).
++void CaptureFrame()
++{
++  const AbstractTexture* xfb = g_presenter ? g_presenter->GetXFBTexture() : nullptr;
++  if (!xfb || !g_gfx)
++    return;
++  const auto format = xfb->GetFormat();
++  if (format != AbstractTextureFormat::RGBA8 && format != AbstractTextureFormat::BGRA8)
++    return;
++  MathUtil::Rectangle<int> rect = g_presenter->GetXFBRect();
++  rect.right = std::min<int>(rect.right, xfb->GetWidth());
++  rect.bottom = std::min<int>(rect.bottom, xfb->GetHeight());
++  const int w = rect.GetWidth(), h = rect.GetHeight();
++  if (w <= 0 || h <= 0)
++    return;
++  const TextureConfig config(w, h, 1, 1, 1, format, 0, AbstractTextureType::Texture_2DArray);
++  auto staging = g_gfx->CreateStagingTexture(StagingTextureType::Readback, config);
++  if (!staging)
++    return;
++  staging->CopyFromTexture(xfb, rect, 0, 0, {0, 0, w, h});
++  staging->Flush();
++  std::vector<u8> pixels(static_cast<size_t>(w) * h * 4);
++  staging->ReadTexels({0, 0, w, h}, pixels.data(), w * 4);
++
++  const auto target = g_presenter->GetTargetRectangle();
++  float aspect = target.GetHeight() > 0 ?
++                     static_cast<float>(target.GetWidth()) / target.GetHeight() :
++                     16.0f / 9.0f;
++  aspect = std::clamp(aspect, 1.0f, 4.0f);
++  const u32 tw = THUMB_WIDTH, th = static_cast<u32>(std::lround(THUMB_WIDTH / aspect));
++  Image thumb = Downscale(pixels, w, h, tw, th, format == AbstractTextureFormat::BGRA8);
++  std::lock_guard lock(g.mutex);
++  g.frame = std::move(thumb);
++}
++
++std::string FormatTime(std::chrono::system_clock::time_point when)
++{
++  const std::time_t t = std::chrono::system_clock::to_time_t(when);
++  std::tm tm{};
++#ifdef _WIN32
++  localtime_s(&tm, &t);
++#else
++  localtime_r(&t, &tm);
++#endif
++  char buf[64];
++  std::strftime(buf, sizeof(buf), "%d %b %Y, %H:%M", &tm);
++  std::string s = buf;
++  if (s.starts_with('0'))
++    s.erase(0, 1);
++  return s;
++}
++
++std::string FileTime(const std::filesystem::path& path)
++{
++  std::error_code ec;
++  const auto ftime = std::filesystem::last_write_time(path, ec);
++  if (ec)
++    return {};
++  return FormatTime(std::chrono::time_point_cast<std::chrono::system_clock::duration>(
++      ftime - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now()));
++}
++
++// Thumbnails are stored raw next to each save: "RRTH", width, height (little-endian u32), RGBA.
++bool WriteThumb(const std::filesystem::path& path, const Image& image)
++{
++  std::string data = "RRTH";
++  for (const u32 v : {image.width, image.height})
++    data.append(reinterpret_cast<const char*>(&v), 4);
++  data.append(reinterpret_cast<const char*>(image.rgba.data()), image.rgba.size());
++  return File::WriteStringToFile(path.string(), data);
++}
++
++bool ReadThumb(const std::filesystem::path& path, Image* image)
++{
++  std::string data;
++  if (!File::ReadFileToString(path.string(), data) || data.size() < 12 || !data.starts_with("RRTH"))
++    return false;
++  std::memcpy(&image->width, data.data() + 4, 4);
++  std::memcpy(&image->height, data.data() + 8, 4);
++  const size_t size = static_cast<size_t>(image->width) * image->height * 4;
++  if (image->width == 0 || image->height == 0 || image->width > 4096 || image->height > 4096 ||
++      data.size() != 12 + size)
++    return false;
++  image->rgba.assign(data.begin() + 12, data.end());
++  return true;
++}
++
++// Menu thread: read what is on disk for each slot.
++void RefreshSlots()
++{
++  for (int i = 0; i < SLOTS; ++i)
++  {
++    std::error_code ec;
++    const bool exists = std::filesystem::exists(SlotPath(i, ".sav"), ec);
++    Image thumb;
++    if (exists && !ReadThumb(SlotPath(i, ".thumb"), &thumb))
++      thumb = {};
++    std::lock_guard lock(g.mutex);
++    Slot& slot = g.slots[i];
++    slot.exists = exists;
++    slot.when = exists ? FileTime(SlotPath(i, ".sav")) : std::string();
++    slot.thumb = std::move(thumb);
++    slot.dirty = true;
++  }
++}
++
++// ---- drawing (video thread) --------------------------------------------------------------------
++
++// Colours follow the version being played, as in the launcher's tabs (tools/launcher.pyw TABS):
++// window body, panel, accent, and light accent.
++struct Theme
++{
++  u32 bg, panel, accent, light;
++};
++constexpr Theme GREEN{0x10251a, 0x173623, 0x1f8a45, 0x2fa85a};
++constexpr Theme RED{0x2a1012, 0x3e181b, 0xc42626, 0xe0483f};
++constexpr Theme BLUE{0x0f1a33, 0x172a50, 0x1e56c4, 0x3f78e6};
++
++ImU32 Rgb(u32 rgb, u32 alpha = 255)
++{
++  return IM_COL32((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF, alpha);
++}
++
++// Mixes rgb toward white by f (0..1).
++u32 Lighten(u32 rgb, float f)
++{
++  u32 out = 0;
++  for (int shift = 16; shift >= 0; shift -= 8)
++  {
++    const float c = static_cast<float>((rgb >> shift) & 0xFF);
++    out |= static_cast<u32>(c + (255.0f - c) * f) << shift;
++  }
++  return out;
++}
++
++ImU32 DIM, PANEL, PANEL_EDGE, ACCENT, ACCENT_LIGHT, CARD, CARD_HOVER, EMPTY;
++constexpr ImU32 TEXT = IM_COL32(244, 246, 250, 255);
++constexpr ImU32 MUTED = IM_COL32(185, 192, 204, 255);
++constexpr ImU32 FAINT = IM_COL32(130, 138, 152, 255);
++
++void SetTheme(const Theme& th)
++{
++  DIM = Rgb(th.bg, 180);
++  PANEL = Rgb(th.panel, 246);
++  PANEL_EDGE = Rgb(th.light, 200);
++  ACCENT = Rgb(th.accent);
++  ACCENT_LIGHT = Rgb(th.light);
++  CARD = Rgb(Lighten(th.panel, 0.05f));
++  CARD_HOVER = Rgb(Lighten(th.panel, 0.12f));
++  EMPTY = Rgb(th.bg);
++}
++
++ImU32 Fade(ImU32 col, float a)
++{
++  const u32 alpha = static_cast<u32>(((col >> IM_COL32_A_SHIFT) & 0xFF) * a);
++  return (col & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT);
++}
++
++ImFont* Font(bool bold)
++{
++  ImFont* f = bold ? s_font_bold : s_font;
++  return f ? f : ImGui::GetFont();
++}
++
++ImVec2 Measure(bool bold, float size, const char* text)
++{
++  return Font(bold)->CalcTextSizeA(size, FLT_MAX, 0.0f, text);
++}
++
++// Text whose capital letters are vertically centred on cy (so it lines up with badges and rows).
++void Text(ImDrawList* dl, bool bold, float size, float x, float cy, ImU32 col, const char* text)
++{
++  const ImFontGlyph* cap = Font(bold)->GetFontBaked(size)->FindGlyph(static_cast<ImWchar>('H'));
++  const float mid = cap ? (cap->Y0 + cap->Y1) * 0.5f : size * 0.5f;
++  dl->AddText(Font(bold), size, ImVec2(std::round(x), std::round(cy - mid)), col, text);
++}
++
++// Draws text so that its drawn shape (not the font's line box) is centred on (cx, cy): horizontally by
++// the ink of the first and last glyphs, vertically by the ink of the first glyph (a capital, or the
++// single symbol of a badge).
++void TextCentred(ImDrawList* dl, bool bold, float size, float cx, float cy, ImU32 col, const char* text)
++{
++  ImFont* font = Font(bold);
++  ImFontBaked* baked = font->GetFontBaked(size);
++  const size_t n = std::strlen(text);
++  const ImFontGlyph* first = n ? baked->FindGlyph(static_cast<ImWchar>(text[0])) : nullptr;
++  const ImFontGlyph* last = n ? baked->FindGlyph(static_cast<ImWchar>(text[n - 1])) : nullptr;
++  if (!first || !last)
++    return;
++  const float width = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text).x;
++  const float ink_left = first->X0;
++  const float ink_right = width - last->AdvanceX + last->X1;
++  const float x = cx - (ink_left + ink_right) * 0.5f;
++  const float y = cy - (first->Y0 + first->Y1) * 0.5f;
++  dl->AddText(font, size, ImVec2(std::round(x), std::round(y)), col, text);
++}
++
++// A round button badge with the letter the game shows in its prompts (as in the launcher pictures).
++float Badge(ImDrawList* dl, float x, float cy, float u, const char* letter)
++{
++  const float r = 15 * u;
++  dl->AddCircle(ImVec2(x + r, cy), r, MUTED, 0, 2 * u);
++  TextCentred(dl, true, 18 * u, x + r, cy, TEXT, letter);
++  return x + 2 * r;
++}
++
++// A keyboard key cap with its name, the same height as a badge.
++float Key(ImDrawList* dl, float x, float cy, float u, const char* name)
++{
++  const float h = 30 * u, size = 17 * u;
++  const float w = std::max(h, Measure(true, size, name).x + 20 * u);
++  dl->AddRect(ImVec2(x, cy - h * 0.5f), ImVec2(x + w, cy + h * 0.5f), MUTED, 7 * u, 0, 2 * u);
++  TextCentred(dl, true, size, x + w * 0.5f, cy, TEXT, name);
++  return x + w;
++}
++
++// One hint: controller badge, keyboard key, then what it does.
++float Hint(ImDrawList* dl, float x, float cy, float u, const char* letter, const char* key,
++           const char* label)
++{
++  x = Badge(dl, x, cy, u, letter) + 8 * u;
++  x = Key(dl, x, cy, u, key) + 12 * u;
++  Text(dl, false, 24 * u, x, cy, MUTED, label);
++  return x + Measure(false, 24 * u, label).x + 36 * u;
++}
++
++void Hints(ImDrawList* dl, float x, float cy, float u, const char* select)
++{
++  x = Hint(dl, x, cy, u, "A", "Enter", select);
++  Hint(dl, x, cy, u, "B", "Esc", "Back");
++}
++
++void UploadThumbnails()
++{
++  for (Slot& slot : g.slots)
++  {
++    if (!slot.dirty)
++      continue;
++    slot.dirty = false;
++    if (slot.texture)
++      VideoCommon::OnScreenUI::linear_textures.erase(slot.texture.get());
++    slot.texture.reset();
++    if (slot.thumb.rgba.empty())
++      continue;
++    const TextureConfig config(slot.thumb.width, slot.thumb.height, 1, 1, 1,
++                               AbstractTextureFormat::RGBA8, 0,
++                               AbstractTextureType::Texture_2DArray);
++    slot.texture = g_gfx->CreateTexture(config, "Menu thumbnail");
++    if (!slot.texture)
++      continue;
++    slot.texture->Load(0, slot.thumb.width, slot.thumb.height, slot.thumb.width,
++                       slot.thumb.rgba.data(), slot.thumb.rgba.size());
++    VideoCommon::OnScreenUI::linear_textures.insert(slot.texture.get());
++  }
++}
++
++void DrawMain(ImDrawList* dl, ImVec2 ds, float u)
++{
++  static const char* const labels[ITEM_COUNT] = {"Resume", "Save state", "Load state",
++                                                 "Fullscreen", "Quit game"};
++  const float pad = 36 * u, row = 66 * u, gap = 6 * u;
++  const float w = 600 * u;
++  constexpr float items = ITEM_COUNT;
++  const float h = pad + 56 * u + 26 * u + items * row + (items - 1) * gap + 34 * u +
++                  34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  Text(dl, true, 48 * u, p0.x + pad, p0.y + pad + 26 * u, TEXT, "Paused");
++  float y = p0.y + pad + 56 * u + 26 * u;
++  for (int i = 0; i < ITEM_COUNT; ++i)
++  {
++    const bool sel = g.item == i;
++    const ImVec2 r0(p0.x + pad - 14 * u, y), r1(p0.x + w - pad + 14 * u, y + row);
++    if (sel)
++      dl->AddRectFilled(r0, r1, ACCENT, 12 * u);
++    Text(dl, sel, 30 * u, p0.x + pad + 6 * u, y + row * 0.5f, TEXT, labels[i]);
++    if (i == static_cast<int>(ITEM_FULLSCREEN))
++    {
++      const char* value = g.fullscreen ? "On" : "Off";
++      const ImVec2 m = Measure(true, 26 * u, value);
++      Text(dl, true, 26 * u, r1.x - 22 * u - m.x, y + row * 0.5f, sel ? TEXT : MUTED, value);
++    }
++    y += row + gap;
++  }
++  Hints(dl, p0.x + pad, p0.y + h - pad - 17 * u, u, "Select");
++}
++
++void DrawSlots(ImDrawList* dl, ImVec2 ds, float u)
++{
++  const bool saving = g.page == Page::Save;
++  const float pad = 40 * u, gap = 24 * u, margin = 12 * u;
++  const float w = std::min(ds.x * 0.92f, 1560 * u);
++  const float card_w = (w - 2 * pad - (SLOTS - 1) * gap) / SLOTS;
++  const float thumb_h = (card_w - 2 * margin) * 9.0f / 16.0f;
++  const float card_h = margin + thumb_h + 16 * u + 30 * u + 8 * u + 24 * u + 18 * u;
++  const float h = pad + 50 * u + 16 * u + 26 * u + 30 * u + card_h + 34 * u + 34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  Text(dl, true, 44 * u, p0.x + pad, p0.y + pad + 25 * u, TEXT, saving ? "Save state" : "Load state");
++  Text(dl, false, 24 * u, p0.x + pad, p0.y + pad + 50 * u + 16 * u + 13 * u, MUTED,
++       saving ? "Choose a slot to save to. Saving replaces what is in it." :
++                "Choose a slot to load. Progress since you saved it is lost.");
++  const float top = p0.y + pad + 50 * u + 16 * u + 26 * u + 30 * u;
++  for (int i = 0; i < SLOTS; ++i)
++  {
++    const Slot& slot = g.slots[i];
++    const bool sel = g.slot == i;
++    const float a = (!saving && !slot.exists) ? 0.45f : 1.0f;
++    const ImVec2 c0(p0.x + pad + i * (card_w + gap), top), c1(c0.x + card_w, top + card_h);
++    dl->AddRectFilled(c0, c1, Fade(sel ? CARD_HOVER : CARD, a), 14 * u);
++    if (sel)
++      dl->AddRect(c0, c1, ACCENT_LIGHT, 14 * u, 0, 4 * u);
++    const ImVec2 t0(c0.x + margin, c0.y + margin), t1(c1.x - margin, t0.y + thumb_h);
++    dl->AddRectFilled(t0, t1, Fade(EMPTY, a), 8 * u);
++    if (slot.texture)
++    {
++      // fit the picture into the 16:9 box, keeping its own shape
++      const float tw = t1.x - t0.x, th = t1.y - t0.y;
++      const float img = static_cast<float>(slot.thumb.width) / slot.thumb.height;
++      float iw = tw, ih = tw / img;
++      if (ih > th)
++      {
++        ih = th;
++        iw = th * img;
++      }
++      const ImVec2 i0(t0.x + (tw - iw) * 0.5f, t0.y + (th - ih) * 0.5f);
++      dl->AddImageRounded(*slot.texture, i0, ImVec2(i0.x + iw, i0.y + ih), ImVec2(0, 0),
++                          ImVec2(1, 1), IM_COL32_WHITE, 8 * u);
++    }
++    else
++    {
++      TextCentred(dl, false, 26 * u, (t0.x + t1.x) * 0.5f, (t0.y + t1.y) * 0.5f, Fade(FAINT, a),
++                  "Empty");
++    }
++    const std::string name = "Slot " + std::to_string(i + 1);
++    float y = t1.y + 16 * u + 15 * u;
++    Text(dl, true, 30 * u, t0.x, y, Fade(TEXT, a), name.c_str());
++    y += 15 * u + 8 * u + 12 * u;
++    Text(dl, false, 23 * u, t0.x, y, Fade(MUTED, a), slot.exists ? slot.when.c_str() : "No save yet");
++  }
++  Hints(dl, p0.x + pad, p0.y + h - pad - 17 * u, u, saving ? "Save here" : "Load");
++}
++
++void Draw()
++{
++  if (!g.open.load())
++    return;
++  std::lock_guard lock(g.mutex);
++  if (!g.open.load())
++    return;
++  UploadThumbnails();
++  ImDrawList* dl = ImGui::GetForegroundDrawList();
++  const ImVec2 ds = ImGui::GetIO().DisplaySize;
++  const float u = std::min(ds.y / 1080.0f, ds.x / 1600.0f);
++  dl->AddRectFilled(ImVec2(0, 0), ds, DIM);
++  if (g.page == Page::Main)
++    DrawMain(dl, ds, u);
++  else
++    DrawSlots(dl, ds, u);
++  if (!g.toast.empty() && Clock::now() < g.toast_until)
++  {
++    const float size = 26 * u;
++    const ImVec2 m = Measure(true, size, g.toast.c_str());
++    const ImVec2 b0(std::round((ds.x - m.x) * 0.5f - 28 * u), std::round(ds.y - 140 * u));
++    const ImVec2 b1(b0.x + m.x + 56 * u, b0.y + 60 * u);
++    dl->AddRectFilled(b0, b1, ACCENT, 30 * u);
++    Text(dl, true, size, b0.x + 28 * u, b0.y + 30 * u, TEXT, g.toast.c_str());
++  }
++}
++
++// Nunito from RR_FONT_DIR (the launcher's bundled fonts, SIL Open Font License), else Windows' Segoe UI.
++void AddFonts()
++{
++  ImGuiIO& io = ImGui::GetIO();
++  if (const char* dir = std::getenv("RR_FONT_DIR"); dir && *dir)
++  {
++    const std::string nunito = std::string(dir) + "\\Nunito-";
++    if (File::Exists(nunito + "Regular.ttf") && File::Exists(nunito + "Bold.ttf"))
++    {
++      s_font = io.Fonts->AddFontFromFileTTF((nunito + "Regular.ttf").c_str(), 32.0f);
++      s_font_bold = io.Fonts->AddFontFromFileTTF((nunito + "Bold.ttf").c_str(), 32.0f);
++      if (s_font && s_font_bold)
++        return;
++    }
++  }
++  const char* windir = std::getenv("WINDIR");
++  const std::string fonts = std::string(windir ? windir : "C:\\Windows") + "\\Fonts\\";
++  if (File::Exists(fonts + "segoeui.ttf"))
++    s_font = io.Fonts->AddFontFromFileTTF((fonts + "segoeui.ttf").c_str(), 32.0f);
++  if (File::Exists(fonts + "seguisb.ttf"))
++    s_font_bold = io.Fonts->AddFontFromFileTTF((fonts + "seguisb.ttf").c_str(), 32.0f);
++  else if (File::Exists(fonts + "segoeuib.ttf"))
++    s_font_bold = io.Fonts->AddFontFromFileTTF((fonts + "segoeuib.ttf").c_str(), 32.0f);
++}
++
++// ---- input and actions (menu thread) -----------------------------------------------------------
++
++struct Pad
++{
++  bool home = false, up = false, down = false, left = false, right = false, confirm = false,
++       back = false;
++  bool Any() const { return home || up || down || left || right || confirm || back; }
++};
++
++// Every connected SDL controller counts, so any player can open the menu. HOME opens it, and so do both sticks
++// pressed in together, or the touchpad click on PlayStation controllers: Steam takes HOME for Big Picture when it
++// is running, and the game uses neither of the others.
++Pad ReadPads()
++{
++  Pad pad;
++  for (const std::string& name : g_controller_interface.GetAllDeviceStrings())
++  {
++    if (name.rfind("SDL/", 0) != 0)
++      continue;
++    ciface::Core::DeviceQualifier q;
++    q.FromString(name);
++    const auto device = g_controller_interface.FindDevice(q);
++    if (!device)
++      continue;
++    bool thumb_l = false, thumb_r = false;
++    for (const auto* input : device->Inputs())
++    {
++      const std::string n = input->GetName();
++      const bool on = input->GetState() > 0.5;
++      if (!on)
++        continue;
++      if (n == "Guide" || n == "Touchpad")
++        pad.home = true;
++      else if (n == "Thumb L")
++        thumb_l = true;
++      else if (n == "Thumb R")
++        thumb_r = true;
++      else if (n == "Pad N" || n == "Left Y+")
++        pad.up = true;
++      else if (n == "Pad S" || n == "Left Y-")
++        pad.down = true;
++      else if (n == "Pad W" || n == "Left X-")
++        pad.left = true;
++      else if (n == "Pad E" || n == "Left X+")
++        pad.right = true;
++      else if (n == "Button S")
++        pad.confirm = true;
++      else if (n == "Button E" || n == "Button W")
++        pad.back = true;
++    }
++    if (thumb_l && thumb_r)
++      pad.home = true;
++  }
++  return pad;
++}
++
++bool KeysHeld()
++{
++#ifdef _WIN32
++  for (const int vk : {VK_RETURN, VK_SPACE, VK_ESCAPE, VK_BACK, int{'J'}, int{'K'}, int{'L'}})
++    if (GetAsyncKeyState(vk) & 0x8000)
++      return true;
++#endif
++  return false;
++}
++
++void Toast(std::string text)
++{
++  g.toast = std::move(text);
++  g.toast_until = Clock::now() + std::chrono::milliseconds(2500);
++}
++
++void RequestRedraw()
++{
++  if (s_redraw_pending.exchange(true))
++    return;
++  AsyncRequests::GetInstance()->PushEvent([] {
++    s_redraw_pending = false;
++    if (g_presenter)
++      g_presenter->Present(nullptr);
++  });
++}
++
++bool s_resume_on_close = false;
++
++void Open()
++{
++  auto& system = Core::System::GetInstance();
++  const auto state = Core::GetState(system);
++  if (state != Core::State::Running && state != Core::State::Paused)
++    return;
++  s_resume_on_close = state == Core::State::Running;
++  if (s_resume_on_close)
++    Core::SetState(system, Core::State::Paused);
++  RefreshSlots();
++  {
++    std::lock_guard lock(g.mutex);
++    g.frame = {};
++    g.page = Page::Main;
++    g.item = ITEM_RESUME;
++    g.toast.clear();
++    g.fullscreen = s_platform && s_platform->IsWindowFullscreen();
++  }
++  AsyncRequests::GetInstance()->PushEvent([] { CaptureFrame(); });
++  g.open = true;
++  RequestRedraw();
++}
++
++// Waits for the buttons and keys used in the menu to be let go, so the game does not see them.
++void WaitForRelease()
++{
++  const auto until = Clock::now() + std::chrono::milliseconds(1500);
++  while (Clock::now() < until)
++  {
++    g_controller_interface.UpdateInput();
++    if (!ReadPads().Any() && !KeysHeld())
++      return;
++    std::this_thread::sleep_for(std::chrono::milliseconds(10));
++  }
++}
++
++void Close(bool resume = true)
++{
++  g.open = false;
++  RequestRedraw();  // one last frame without the menu
++  WaitForRelease();
++  if (resume && s_resume_on_close)
++    Core::SetState(Core::System::GetInstance(), Core::State::Running);
++}
++
++void SaveSlot(int i)
++{
++  std::filesystem::create_directories(s_dir);
++  State::SaveAs(Core::System::GetInstance(), SlotPath(i, ".sav").string());
++  std::lock_guard lock(g.mutex);
++  Slot& slot = g.slots[i];
++  if (!g.frame.rgba.empty())
++  {
++    WriteThumb(SlotPath(i, ".thumb"), g.frame);
++    slot.thumb = g.frame;
++  }
++  slot.exists = true;
++  slot.when = FormatTime(std::chrono::system_clock::now());  // the file is written in the background
++  slot.dirty = true;
++  g.page = Page::Main;
++  Toast("Saved to slot " + std::to_string(i + 1));
++}
++
++enum class Action
++{
++  None,
++  Close,
++  Quit,
++  Save,
++  Load,
++};
++
++// Menu thread: the slot with the newest save, or 0.
++int NewestSlot()
++{
++  int best = 0;
++  std::filesystem::file_time_type best_time{};
++  for (int i = 0; i < SLOTS; ++i)
++  {
++    std::error_code ec;
++    const auto t = std::filesystem::last_write_time(SlotPath(i, ".sav"), ec);
++    if (!ec && t > best_time)
++    {
++      best = i;
++      best_time = t;
++    }
++  }
++  return best;
++}
++
++// Moves through the menu; returns what the menu thread must do outside the lock.
++Action Navigate(int dx, int dy, bool confirm, bool back, int* slot_out)
++{
++  const int newest = NewestSlot();
++  std::lock_guard lock(g.mutex);
++  if (g.page == Page::Main)
++  {
++    g.item = std::clamp(g.item + dy, 0, ITEM_COUNT - 1);
++    if (back)
++      return Action::Close;
++    if (!confirm)
++      return Action::None;
++    switch (g.item)
++    {
++    case ITEM_RESUME:
++      return Action::Close;
++    case ITEM_SAVE:
++    case ITEM_LOAD:
++      g.page = g.item == ITEM_SAVE ? Page::Save : Page::Load;
++      g.slot = g.page == Page::Load ? newest : 0;  // loading starts on the newest save
++      return Action::None;
++    case ITEM_FULLSCREEN:
++      if (s_platform)
++        s_platform->RequestToggleFullscreen();
++      g.fullscreen = !g.fullscreen;
++      return Action::None;
++    case ITEM_QUIT:
++      return Action::Quit;
++    }
++    return Action::None;
++  }
++  g.slot = std::clamp(g.slot + dx, 0, SLOTS - 1);
++  if (back)
++  {
++    g.page = Page::Main;
++    return Action::None;
++  }
++  if (!confirm)
++    return Action::None;
++  *slot_out = g.slot;
++  if (g.page == Page::Save)
++    return Action::Save;
++  return g.slots[g.slot].exists ? Action::Load : Action::None;
++}
++
++// Held directions repeat after a short delay, like a keyboard.
++struct Repeat
++{
++  bool held = false;
++  Clock::time_point next;
++  bool Step(bool on)
++  {
++    const auto now = Clock::now();
++    if (!on)
++    {
++      held = false;
++      return false;
++    }
++    if (!held)
++    {
++      held = true;
++      next = now + std::chrono::milliseconds(380);
++      return true;
++    }
++    if (now >= next)
++    {
++      next = now + std::chrono::milliseconds(120);
++      return true;
++    }
++    return false;
++  }
++};
++
++void Loop(std::stop_token stop)
++{
++  Pad last;
++  Repeat up, down, left, right;
++  auto next_redraw = Clock::now();
++  while (!stop.stop_requested())
++  {
++    std::this_thread::sleep_for(std::chrono::milliseconds(8));
++    const auto core = Core::GetState(Core::System::GetInstance());
++    if (core != Core::State::Running && core != Core::State::Paused)
++      continue;
++    g_controller_interface.UpdateInput();
++    const bool focus = Host_RendererHasFocus();
++    const Pad pad = focus ? ReadPads() : Pad{};
++    std::deque<int> keys;
++    {
++      std::lock_guard lock(s_keys_mutex);
++      keys.swap(s_keys);
++    }
++
++    if (!g.open)
++    {
++      const bool esc = std::find(keys.begin(), keys.end(), 0x1B) != keys.end();
++      if ((pad.home && !last.home) || esc)
++      {
++        Open();
++        up = down = left = right = {};
++        // the button that opened the menu must not also act in it
++        last = pad;
++        last.confirm = last.back = true;
++        continue;
++      }
++      last = pad;
++      continue;
++    }
++
++    int dx = 0, dy = 0;
++    bool confirm = pad.confirm && !last.confirm;
++    bool back = pad.back && !last.back;
++    bool home = pad.home && !last.home;
++    dy += down.Step(pad.down) - up.Step(pad.up);
++    dx += right.Step(pad.right) - left.Step(pad.left);
++    for (const int vk : keys)
++    {
++      switch (vk)
++      {
++      case 0x26: case 'W': dy -= 1; break;            // up
++      case 0x28: case 'S': dy += 1; break;            // down
++      case 0x25: case 'A': dx -= 1; break;            // left
++      case 0x27: case 'D': dx += 1; break;            // right
++      case 0x0D: case 'J': confirm = true; break;     // Enter, J
++      case 0x08: case 'K': back = true; break;        // Backspace, K
++      case 0x1B: home = true; break;                  // Escape
++      }
++    }
++    last = pad;
++
++    if (home)
++    {
++      bool on_main;
++      {
++        std::lock_guard lock(g.mutex);
++        on_main = g.page == Page::Main;
++      }
++      if (on_main)
++      {
++        Close();
++        continue;
++      }
++      back = true;  // Escape or HOME on a slot page goes back first
++    }
++
++    int slot = 0;
++    const Action action = Navigate(dx, dy, confirm, back, &slot);
++    if (action == Action::Save)
++      SaveSlot(slot);
++    if (action == Action::Close)
++    {
++      Close();
++      continue;
++    }
++    if (action == Action::Quit)
++    {
++      Close(false);
++      if (s_platform)
++        s_platform->Stop();
++      continue;
++    }
++    if (action == Action::Load)
++    {
++      State::LoadAs(Core::System::GetInstance(), SlotPath(slot, ".sav").string());
++      Close();
++      continue;
++    }
++    const auto now = Clock::now();
++    if (now >= next_redraw)
++    {
++      RequestRedraw();
++      next_redraw = now + std::chrono::milliseconds(16);
++    }
++  }
++}
++
++}  // namespace
++
++void Install(std::filesystem::path state_directory, Platform* platform)
++{
++  // RR_MENU_COLOUR (set by the launcher) names the version's colour; otherwise guess from the folder.
++  const char* colour = std::getenv("RR_MENU_COLOUR");
++  std::string name = colour ? colour : state_directory.filename().string();
++  std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return std::tolower(c); });
++  if (name == "blue" || name.find("patch1") != std::string::npos)
++    SetTheme(BLUE);
++  else if (name == "red" || name.find("weekend") != std::string::npos)
++    SetTheme(RED);
++  else
++    SetTheme(GREEN);
++  s_dir = std::move(state_directory);
++  s_platform = platform;
++  VideoCommon::OnScreenUI::custom_init = AddFonts;
++  VideoCommon::OnScreenUI::custom_draw = Draw;
++  Platform::key_hook = [](int vk) {
++    if (vk != 0x1B && !g.open.load())
++      return false;
++    std::lock_guard lock(s_keys_mutex);
++    s_keys.push_back(vk);
++    return true;
++  };
++}
++
++void PushKey(int vk)
++{
++  std::lock_guard lock(s_keys_mutex);
++  s_keys.push_back(vk);
++}
++
++void Start()
++{
++  s_thread = std::jthread(Loop);
++}
++
++void Stop()
++{
++  s_thread.request_stop();
++  if (s_thread.joinable())
++    s_thread.join();
++  Platform::key_hook = nullptr;
++  VideoCommon::OnScreenUI::custom_draw = nullptr;
++  g.open = false;
++  // The video backend is gone by now: let go of the thumbnail textures without destroying them.
++  std::lock_guard lock(g.mutex);
++  for (Slot& slot : g.slots)
++    (void)slot.texture.release();
++  VideoCommon::OnScreenUI::linear_textures.clear();
++}
++
++}  // namespace moderngekko::menu

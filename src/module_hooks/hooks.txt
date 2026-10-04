@@ -1,0 +1,13 @@
+# DolRecomp instruction hooks (ADDR:function), compiled from rumble_hud.c. Same sites in vanilla and Weekend.
+802A52F4:rr_hook_lyt_pane_translate
+80269DCC:rr_hook_view_perspective
+80264FBC:rr_hook_view_perspective
+800632B4:rr_hook_view_perspective
+80269DF4:rr_hook_view_frustum
+80264F94:rr_hook_view_frustum
+80063230:rr_hook_view_frustum
+80159AD0:rr_hook_randomizer
+802A5268:rr_hook_lyt_pane_scale
+802A51C8:rr_hook_lyt_pane_enter
+802A7648:rr_hook_picture_draw
+802A764C:rr_hook_picture_drawn

@@ -1,0 +1,35 @@
+diff --git a/Source/Core/DolphinNoGUI/PlatformWin32.cpp b/Source/Core/DolphinNoGUI/PlatformWin32.cpp
+index 3402fda..77ada65 100644
+--- a/Source/Core/DolphinNoGUI/PlatformWin32.cpp
++++ b/Source/Core/DolphinNoGUI/PlatformWin32.cpp
+@@ -89,8 +89,16 @@ private:
+ 
+ PlatformWin32::~PlatformWin32()
+ {
+-  if (m_hwnd)
+-    DestroyWindow(m_hwnd);
++  if (!m_hwnd)
++    return;
++
++  // DestroyWindow synchronously delivers WM_ACTIVATE/WM_KILLFOCUS/... to WndProc
++  // while this object is half-destroyed and, in the runtime, possibly after
++  // Config::Shutdown. Detach first so WndProc treats those as a dead window; an
++  // access violation there surfaces as STATUS_FATAL_USER_CALLBACK_EXCEPTION.
++  SetWindowLongPtr(m_hwnd, GWLP_USERDATA, 0);
++  DestroyWindow(m_hwnd);
++  m_hwnd = nullptr;
+ }
+ 
+ bool PlatformWin32::RegisterRenderWindowClass()
+@@ -335,6 +343,11 @@ LRESULT PlatformWin32::WndProc(const HWND hwnd, const UINT msg, const WPARAM wPa
+                                const LPARAM lParam)
+ {
+   PlatformWin32* platform = reinterpret_cast<PlatformWin32*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
++  // No owner: either before WM_NCCREATE or during ~PlatformWin32's DestroyWindow,
++  // when neither the platform nor Config may be touched.
++  if (!platform && msg != WM_NCCREATE)
++    return DefWindowProc(hwnd, msg, wParam, lParam);
++
+   switch (msg)
+   {
+   case WM_NCCREATE:

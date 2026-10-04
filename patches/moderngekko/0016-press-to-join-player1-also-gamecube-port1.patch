@@ -1,0 +1,33 @@
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -446,8 +446,9 @@
+ }
+ 
+ // RumbleRecomp: press-to-join player assignment (RR_PRESS_TO_JOIN=1, set by the launcher).
+-// Player 1 is Wii Remote 1 (keyboard always bound; the first gamepad that presses a button is
+-// added), players 2-4 are GameCube pad ports 2-4 (what the game's local multiplayer reads).
++// Player 1 is Wii Remote 1 plus GameCube pad port 1 (keyboard always bound; the first gamepad that
++// presses a button is added), players 2-4 are GameCube pad ports 2-4 (what the game's local
++// multiplayer reads).
+ // The launcher writes those mappings with unqualified gamepad control names ("Button S"), which
+ // resolve against each controller's default device, so assigning a player is just setting
+ // that default device. Only SDL devices are considered (XInput/DInput expose the same physical
+@@ -489,11 +490,15 @@
+     assigned.push_back(name);
+     const int slot = static_cast<int>(assigned.size()) - 1;
+     {
++      // Player 1 drives both Wii Remote 1 and GameCube pad port 1: the game reads the Wii Remote
++      // in single player and only the GameCube pads in the multiplayer join screen.
+       const auto lock = ControllerEmu::EmulatedController::GetStateLock();
+-      ControllerEmu::EmulatedController* controller =
+-          slot == 0 ? Wiimote::GetConfig()->GetController(0) : Pad::GetConfig()->GetController(slot);
+-      if (controller)
++      for (ControllerEmu::EmulatedController* controller :
++           {slot == 0 ? Wiimote::GetConfig()->GetController(0) : nullptr,
++            Pad::GetConfig()->GetController(slot)})
+       {
++        if (!controller)
++          continue;
+         controller->SetDefaultDevice(name);
+         controller->UpdateReferences(g_controller_interface);
+       }

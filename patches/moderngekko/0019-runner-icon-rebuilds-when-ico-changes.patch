@@ -1,0 +1,12 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -428,6 +428,9 @@
+         file(TO_CMAKE_PATH "${MODERNGEKKO_RUN_ICON}" _moderngekko_run_icon)
+         file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/moderngekko_run_icon.rc" "1 ICON \"${_moderngekko_run_icon}\"\n")
+         target_sources(moderngekko-run PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/moderngekko_run_icon.rc")
++        # RumbleRecomp: rebuild the icon resource when the .ico changes, not only when the .rc does
++        set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/moderngekko_run_icon.rc"
++            PROPERTIES OBJECT_DEPENDS "${_moderngekko_run_icon}")
+     endif()
+     target_include_directories(moderngekko-run PRIVATE
+         "${CMAKE_CURRENT_SOURCE_DIR}/tools"

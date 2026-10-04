@@ -1,0 +1,174 @@
+--- a/Source/Core/DolphinNoGUI/Platform.h
++++ b/Source/Core/DolphinNoGUI/Platform.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <functional>
+ #include <memory>
+ #include <string>
+ 
+@@ -36,6 +37,12 @@
+   // Request an immediate shutdown.
+   void Stop();
+ 
++  // RumbleRecomp: in-game menu. key_hook sees each key pressed in the game window first (Windows
++  // virtual-key code) and returns true when it used the key. RequestToggleFullscreen may be called
++  // from any thread.
++  static inline std::function<bool(int)> key_hook;
++  virtual void RequestToggleFullscreen() {}
++
+   static std::unique_ptr<Platform> CreateHeadlessPlatform();
+ #ifdef HAVE_WAYLAND
+   static std::unique_ptr<Platform> CreateWaylandPlatform();
+--- a/Source/Core/DolphinNoGUI/PlatformWin32.cpp
++++ b/Source/Core/DolphinNoGUI/PlatformWin32.cpp
+@@ -66,6 +66,7 @@
+   void RefreshMenu(HMENU menu);
+   void SaveStateToStatesDirectory();
+   void ToggleFullscreen();
++  void RequestToggleFullscreen() override;
+   void UpdateWindowPosition();
+   void ProcessEvents();
+ 
+@@ -267,6 +268,7 @@
+                  monitor.rcMonitor.bottom - monitor.rcMonitor.top,
+                  SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+     m_fullscreen = true;
++    m_window_fullscreen = true;
+     return;
+   }
+ 
+@@ -277,6 +279,15 @@
+                m_windowed_rect.bottom - m_windowed_rect.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED | SWP_NOZORDER);
+   m_fullscreen = false;
++  m_window_fullscreen = false;
++}
++
++// RumbleRecomp: window changes belong on the window's own thread.
++static constexpr UINT WM_RR_TOGGLE_FULLSCREEN = WM_APP + 1;
++
++void PlatformWin32::RequestToggleFullscreen()
++{
++  PostMessage(m_hwnd, WM_RR_TOGGLE_FULLSCREEN, 0, 0);
+ }
+ 
+ bool PlatformWin32::Init()
+@@ -390,7 +401,14 @@
+   }
+   break;
+ 
++  case WM_RR_TOGGLE_FULLSCREEN:
++    platform->ToggleFullscreen();
++    return 0;
++
+   case WM_KEYDOWN:
++    // RumbleRecomp: the in-game menu gets keys first (Escape opens it, so Escape no longer quits).
++    if (Platform::key_hook && Platform::key_hook(static_cast<int>(wParam)))
++      return 0;
+     // Bit 30 of lParam is the previous key state: ignore auto-repeat, or holding
+     // F1 down would write a state every few milliseconds.
+     if (wParam == VK_F1 && (static_cast<ULONG_PTR>(lParam) & (1u << 30)) == 0)
+@@ -398,7 +416,7 @@
+       platform->SaveStateToStatesDirectory();
+       return 0;
+     }
+-    else if (wParam == VK_SPACE)
++    else if (wParam == VK_SPACE)  // RumbleRecomp: hold Space to fast forward (not bound in the game)
+     {
+       Config::SetCurrent(Config::MAIN_EMULATION_SPEED, FAST_FORWARD_SPEED);
+       return 0;
+--- a/Source/Core/VideoCommon/OnScreenUI.h
++++ b/Source/Core/VideoCommon/OnScreenUI.h
+@@ -3,9 +3,11 @@
+ 
+ #pragma once
+ 
++#include <functional>
+ #include <map>
+ #include <memory>
+ #include <mutex>
++#include <set>
+ #include <span>
+ #include <vector>
+ 
+@@ -35,6 +37,13 @@
+   std::unique_lock<std::mutex> GetImGuiLock();
+ 
+   bool IsReady() { return m_ready; }
++
++  // RumbleRecomp: in-game menu. custom_init runs once after the fonts are set up (add fonts there);
++  // custom_draw runs on the video thread each frame, inside the ImGui frame, before rendering.
++  // Textures in linear_textures (menu thumbnails) are drawn with linear filtering.
++  static inline std::function<void()> custom_init;
++  static inline std::function<void()> custom_draw;
++  static inline std::set<const AbstractTexture*> linear_textures;
+ 
+   // Sets up ImGui state for the next frame.
+   // This function itself acquires the ImGui lock, so it should not be held.
+--- a/Source/Core/VideoCommon/OnScreenUI.cpp
++++ b/Source/Core/VideoCommon/OnScreenUI.cpp
+@@ -94,6 +94,13 @@
+   {
+     io.Fonts->Clear();
+     io.Fonts->AddFontFromFileTTF(file.c_str());
++  }
++
++  if (custom_init)
++  {
++    if (io.Fonts->Fonts.empty())
++      io.Fonts->AddFontDefault();  // keep ImGui's own font as the default for Dolphin's messages
++    custom_init();
+   }
+ 
+   // Setup new font management behavior
+@@ -256,7 +263,11 @@
+               static_cast<int>(cmd.ClipRect.x), static_cast<int>(cmd.ClipRect.y),
+               static_cast<int>(cmd.ClipRect.z), static_cast<int>(cmd.ClipRect.w)),
+           g_gfx->GetCurrentFramebuffer()));
+-      g_gfx->SetTexture(0, reinterpret_cast<const AbstractTexture*>(cmd.GetTexID()));
++      const auto* texture = reinterpret_cast<const AbstractTexture*>(cmd.GetTexID());
++      g_gfx->SetSamplerState(0, linear_textures.contains(texture) ?
++                                    RenderState::GetLinearSamplerState() :
++                                    RenderState::GetPointSamplerState());
++      g_gfx->SetTexture(0, texture);
+       g_gfx->DrawIndexed(base_index, cmd.ElemCount, base_vertex);
+       base_index += cmd.ElemCount;
+     }
+@@ -422,6 +433,8 @@
+   DrawDebugText();
+   OSD::DrawMessages();
+   DrawChallengesAndLeaderboards();
++  if (custom_draw)
++    custom_draw();
+   ImGui::Render();
+ 
+   // Check for font changes
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -108,6 +108,10 @@
+   void DoState(PointerWrap& p);
+ 
+   const MathUtil::Rectangle<int>& GetTargetRectangle() const { return m_target_rectangle; }
++
++  // RumbleRecomp: the last game frame (for the in-game menu's save state thumbnails).
++  const AbstractTexture* GetXFBTexture() const;
++  const MathUtil::Rectangle<int>& GetXFBRect() const { return m_xfb_rect; }
+   // RumbleRecomp: true while the current frame is presented at native aspect with side panels
+   // (see g_rr_native_aspect_scene).
+   bool IsNativeAspectScene() const { return m_native_aspect_scene; }
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -1043,6 +1043,11 @@
+   g_gfx->EndUtilityDrawing();
+ }
+ 
++const AbstractTexture* Presenter::GetXFBTexture() const
++{
++  return m_xfb_entry ? m_xfb_entry->texture.get() : nullptr;
++}
++
+ TimePoint Presenter::GetUpdatedPresentationTime(TimePoint intended_presentation_time)
+ {
+   const auto now = Clock::now();

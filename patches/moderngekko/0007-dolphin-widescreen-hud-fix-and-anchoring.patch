@@ -1,0 +1,350 @@
+diff --git a/Source/Core/Core/Config/GraphicsSettings.cpp b/Source/Core/Core/Config/GraphicsSettings.cpp
+index fb7f6a8..a9cb7ec 100644
+--- a/Source/Core/Core/Config/GraphicsSettings.cpp
++++ b/Source/Core/Core/Config/GraphicsSettings.cpp
+@@ -19,6 +19,8 @@ const Info<int> GFX_ADAPTER{{System::GFX, "Hardware", "Adapter"}, 0};
+ // Graphics.Settings
+ 
+ const Info<bool> GFX_WIDESCREEN_HACK{{System::GFX, "Settings", "wideScreenHack"}, false};
++const Info<bool> GFX_WIDESCREEN_HACK_HUD_FIX{{System::GFX, "Settings", "wideScreenHackHUDFix"},
++                                             true};
+ const Info<AspectMode> GFX_ASPECT_RATIO{{System::GFX, "Settings", "AspectRatio"}, AspectMode::Auto};
+ const Info<int> GFX_CUSTOM_ASPECT_RATIO_WIDTH{{System::GFX, "Settings", "CustomAspectRatioWidth"},
+                                               1};
+diff --git a/Source/Core/Core/Config/GraphicsSettings.h b/Source/Core/Core/Config/GraphicsSettings.h
+index 831e044..9f1c32d 100644
+--- a/Source/Core/Core/Config/GraphicsSettings.h
++++ b/Source/Core/Core/Config/GraphicsSettings.h
+@@ -31,6 +31,8 @@ extern const Info<int> GFX_ADAPTER;
+ // Graphics.Settings
+ 
+ extern const Info<bool> GFX_WIDESCREEN_HACK;
++// RumbleRecomp: widen full-screen 2D (HUD) projections by the widescreen-hack factor.
++extern const Info<bool> GFX_WIDESCREEN_HACK_HUD_FIX;
+ extern const Info<AspectMode> GFX_ASPECT_RATIO;
+ extern const Info<int> GFX_CUSTOM_ASPECT_RATIO_WIDTH;
+ extern const Info<int> GFX_CUSTOM_ASPECT_RATIO_HEIGHT;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+index 6a997d6..a6f7686 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+@@ -360,6 +360,10 @@ void StaticRecompCore::LoadModule()
+                                m_library.GetSymbolAddress("staticrecomp_set_direct_calls")) :
+                            nullptr;
+   m_direct_calls_state = -1;
++  m_set_hud_anchor = m_library.IsOpen() ?
++                         reinterpret_cast<void (*)(float, float)>(
++                             m_library.GetSymbolAddress("staticrecomp_set_hud_anchor")) :
++                         nullptr;
+   m_has_rel_modules = desc->num_rel_modules != 0;
+   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
+   m_chunk_host_call_state.assign(desc->num_chunk_ranges, 0);
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index 3685283..cc214b8 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -174,6 +174,9 @@ private:
+   // RumbleRecomp: set when a dispatch hit a non-entry pc and executed nothing;
+   // the next Run iteration interprets one instruction instead.
+   bool m_interpret_next = false;
++  // RumbleRecomp: optional module export receiving the widescreen HUD anchor offsets
++  // (module_hooks/rumble_hud.c). Updated every timing slice.
++  void (*m_set_hud_anchor)(float, float) = nullptr;
+   u64 m_non_entry_dispatches = 0;
+   u32 m_host_call_passthrough_pc = 0;
+   bool m_host_call_passthrough = false;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+index 8a53be0..7374db9 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -11,6 +11,7 @@
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Config/ConfigManager.h"
+ #include "Core/HW/SystemTimers.h"
++#include "VideoCommon/VideoConfig.h"
+ 
+ #include <cstdio>
+ #include <cstdlib>
+@@ -133,6 +134,23 @@ void StaticRecompCore::Run()
+           m_module_source.host_call_active(m_module_source.host_call_user);
+       m_guest.host_call = active ? HookHostCall : nullptr;
+     }
++    // RumbleRecomp: hand the module the widescreen HUD anchor offsets, in the game's
++    // 648x480 layout units: the distance the screen edges moved outward. Mirrors the
++    // 2D compression in VertexShaderManager (same factors, same enable switches).
++    if (m_set_hud_anchor)
++    {
++      float dx = 0.0f, dy = 0.0f;
++      if (g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix)
++      {
++        const float w = g_ActiveConfig.fAspectRatioHackW;
++        const float h = g_ActiveConfig.fAspectRatioHackH;
++        if (w > 0.0f && w < 1.0f)
++          dx = 324.0f * (1.0f / w - 1.0f);
++        if (h > 0.0f && h < 1.0f)
++          dy = 240.0f * (1.0f / h - 1.0f);
++      }
++      m_set_hud_anchor(dx, dy);
++    }
+     // Direct cross-chunk calls bypass every per-dispatch check below; allow
+     // them only while none of those checks has anything to catch.
+     if (m_set_direct_calls)
+diff --git a/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.cpp b/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.cpp
+index d141af5..5628871 100644
+--- a/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.cpp
++++ b/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.cpp
+@@ -3,6 +3,8 @@
+ 
+ #include "VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h"
+ 
++#include "VideoCommon/VideoConfig.h"
++
+ std::unique_ptr<MoveAction> MoveAction::Create(const picojson::value& json_data)
+ {
+   Common::Vec3 position_offset;
+@@ -23,13 +25,36 @@ std::unique_ptr<MoveAction> MoveAction::Create(const picojson::value& json_data)
+   {
+     position_offset.z = static_cast<float>(z.get<double>());
+   }
+-  return std::make_unique<MoveAction>(position_offset);
++  // RumbleRecomp: "anchor": "left" | "right". Under the widescreen hack, full-screen 2D is
++  // compressed toward the centre by fAspectRatioHackW (see VertexShaderManager), which keeps
++  // HUD proportions right but leaves corner widgets at the edges of a centred native-aspect
++  // area. An anchored draw is shifted in clip space by (1 - fAspectRatioHackW) toward its
++  // side, so it keeps the same distance from the real screen edge at any aspect ratio,
++  // including live window resizes. Without the widescreen hack the factor is 1: no shift.
++  int anchor = 0;
++  if (const auto& a = json_data.get("anchor"); a.is<std::string>())
++  {
++    if (a.get<std::string>() == "left")
++      anchor = -1;
++    else if (a.get<std::string>() == "right")
++      anchor = 1;
++  }
++  return std::make_unique<MoveAction>(position_offset, anchor);
+ }
+ 
+-MoveAction::MoveAction(Common::Vec3 position_offset) : m_position_offset(position_offset)
++MoveAction::MoveAction(Common::Vec3 position_offset, int anchor)
++    : m_position_offset(position_offset), m_anchor(anchor)
+ {
+ }
+ 
++static void ApplyAnchor(Common::Matrix44& matrix, int anchor)
++{
++  if (anchor == 0 || !g_ActiveConfig.bWidescreenHack)
++    return;
++  // Row 0 of the clip-space transform: adding to its translation term shifts NDC x.
++  matrix.data[3] += static_cast<float>(anchor) * (1.0f - g_ActiveConfig.fAspectRatioHackW);
++}
++
+ void MoveAction::OnProjection(GraphicsModActionData::Projection* projection)
+ {
+   if (!projection) [[unlikely]]
+@@ -40,6 +65,7 @@ void MoveAction::OnProjection(GraphicsModActionData::Projection* projection)
+ 
+   auto& matrix = *projection->matrix;
+   matrix = matrix * Common::Matrix44::Translate(m_position_offset);
++  ApplyAnchor(matrix, m_anchor);
+ }
+ 
+ void MoveAction::OnProjectionAndTexture(GraphicsModActionData::Projection* projection)
+@@ -52,4 +78,5 @@ void MoveAction::OnProjectionAndTexture(GraphicsModActionData::Projection* proje
+ 
+   auto& matrix = *projection->matrix;
+   matrix = matrix * Common::Matrix44::Translate(m_position_offset);
++  ApplyAnchor(matrix, m_anchor);
+ }
+diff --git a/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h b/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h
+index b7a0358..fe6f04d 100644
+--- a/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h
++++ b/Source/Core/VideoCommon/GraphicsModSystem/Runtime/Actions/MoveAction.h
+@@ -15,10 +15,13 @@ class MoveAction final : public GraphicsModAction
+ public:
+   static constexpr std::string_view factory_name = "move";
+   static std::unique_ptr<MoveAction> Create(const picojson::value& json_data);
+-  explicit MoveAction(Common::Vec3 position_offset);
++  explicit MoveAction(Common::Vec3 position_offset, int anchor = 0);
+   void OnProjection(GraphicsModActionData::Projection* projection) override;
+   void OnProjectionAndTexture(GraphicsModActionData::Projection* projection) override;
+ 
+ private:
+   Common::Vec3 m_position_offset;
++  // RumbleRecomp: -1 = keep the draw anchored to the left screen edge, +1 = right edge,
++  // 0 = plain offset. See MoveAction.cpp.
++  int m_anchor = 0;
+ };
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
+index 2bc6d58..53005e0 100644
+--- a/Source/Core/VideoCommon/VertexManagerBase.cpp
++++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
+@@ -5,7 +5,11 @@
+ 
+ #include <array>
+ #include <cmath>
++#include <cstdio>
++#include <cstdlib>
+ #include <memory>
++#include <set>
++#include <string>
+ 
+ #include "Common/ChunkFile.h"
+ #include "Common/CommonTypes.h"
+@@ -597,6 +601,39 @@ void VertexManagerBase::Flush()
+     }
+   }
+   vertex_shader_manager.SetConstants(texture_names, xf_state_manager);
++  // RumbleRecomp (temporary diagnostics): RR_LOG_HUD=1 logs, once per texture set and
++  // position bucket, where full-screen centred 2D draws land horizontally in native-aspect
++  // clip space (-1 = left edge, +1 = right edge), used to find which textures make up
++  // screen-anchored HUD widgets. Needs graphics mods on (for texture names).
++  {
++    static const bool log_hud = [] {
++      const char* v = std::getenv("RR_LOG_HUD");
++      return v && v[0] == '1';
++    }();
++    if (log_hud && !texture_names.empty() &&
++        xfmem.projection.type == ProjectionType::Orthographic &&
++        std::abs(xfmem.projection.rawProjection[1]) < 1e-3f &&
++        std::abs(xfmem.viewport.wd * 2.0f) >= static_cast<float>(EFB_WIDTH) - 1.0f)
++    {
++      float clip[4];
++      const PortableVertexDeclaration vd =
++          VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration();
++      u32 mtx = g_main_cp_state.matrix_index_a.PosNormalMtxIdx;
++      if (vd.posmtx.enable)
++        mtx = VertexLoaderManager::position_matrix_index_cache[2];
++      vertex_shader_manager.TransformToClipSpace(&VertexLoaderManager::position_cache[2][0], clip,
++                                                 mtx);
++      const float s = g_ActiveConfig.bWidescreenHack ? g_ActiveConfig.fAspectRatioHackW : 1.0f;
++      const float native_x = clip[0] / clip[3] / s;
++      std::string key;
++      for (const auto& n : texture_names)
++        key += n + " ";
++      const int bucket = static_cast<int>(std::floor(native_x * 10.0f));
++      static std::set<std::string> seen;
++      if (seen.size() < 2000 && seen.insert(key + std::to_string(bucket)).second)
++        std::fprintf(stderr, "[hud] x=%+.2f %s\n", native_x, key.c_str());
++    }
++  }
+   if (!bpmem.genMode.zfreeze)
+   {
+     // Must be done after VertexShaderManager::SetConstants()
+diff --git a/Source/Core/VideoCommon/VertexShaderManager.cpp b/Source/Core/VideoCommon/VertexShaderManager.cpp
+index 6d69803..cfcd706 100644
+--- a/Source/Core/VideoCommon/VertexShaderManager.cpp
++++ b/Source/Core/VideoCommon/VertexShaderManager.cpp
+@@ -6,7 +6,10 @@
+ #include <array>
+ #include <cmath>
+ #include <cstring>
++#include <cstdio>
++#include <cstdlib>
+ #include <iterator>
++#include <set>
+ 
+ #include "Common/ChunkFile.h"
+ #include "Common/CommonTypes.h"
+@@ -97,6 +100,58 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
+     m_projection_matrix[14] = 0.0f;
+     m_projection_matrix[15] = 1.0f;
+ 
++    // RumbleRecomp: the widescreen hack widens perspective (3D) projections by
++    // fAspectRatioHackW but leaves orthographic ones alone, so a 2D HUD authored for the
++    // game's native aspect gets stretched across a wider window. Compress full-screen 2D
++    // draws horizontally about the screen centre by the same factor, which restores their
++    // proportions and keeps screen-space elements attached to on-screen characters (the
++    // widened 3D view pulls off-centre objects inward by exactly that factor). Only
++    // draws into a full-width viewport qualify: off-screen passes (shadow/outline
++    // textures rendered into square viewports) must stay untouched. The factor tracks
++    // the window/custom aspect live, so fit-to-window resizing is covered too.
++    // Only horizontally centred projections (left == -right) qualify: NW4R layouts (the
++    // HUD) use those, while full-screen composites of off-screen passes (e.g. Pokémon
++    // Rumble's character outlines) use a 0..width projection and must keep covering the
++    // whole screen.
++    if (g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
++        std::abs(xfmem.viewport.wd * 2.0f) >= static_cast<float>(EFB_WIDTH) - 1.0f &&
++        std::abs(rawProjection[1]) < 1e-3f)
++    {
++      // Hor+ (window wider than the game): fAspectRatioHackW < 1. Vert+ (taller):
++      // fAspectRatioHackH < 1. Either way the HUD keeps its proportions and its size
++      // relative to the screen's limiting dimension, so it never shrinks or stretches.
++      m_projection_matrix[0] *= g_ActiveConfig.fAspectRatioHackW;
++      m_projection_matrix[3] *= g_ActiveConfig.fAspectRatioHackW;
++      m_projection_matrix[5] *= g_ActiveConfig.fAspectRatioHackH;
++      m_projection_matrix[7] *= g_ActiveConfig.fAspectRatioHackH;
++    }
++
++    // RumbleRecomp (temporary diagnostics): RR_LOG_ORTHO=1 prints each distinct
++    // orthographic projection once, with the viewport it is drawn into.
++    {
++      static const bool log_ortho = [] {
++        const char* v = std::getenv("RR_LOG_ORTHO");
++        return v && v[0] == '1';
++      }();
++      if (log_ortho)
++      {
++        static std::set<std::array<int, 6>> seen;
++        const std::array<int, 6> key{
++            static_cast<int>(rawProjection[0] * 1e6f), static_cast<int>(rawProjection[1] * 1e4f),
++            static_cast<int>(rawProjection[2] * 1e6f), static_cast<int>(rawProjection[3] * 1e4f),
++            static_cast<int>(xfmem.viewport.wd), static_cast<int>(xfmem.viewport.ht)};
++        if (seen.size() < 256 && seen.insert(key).second)
++        {
++          const float l = (-1.0f - rawProjection[1]) / rawProjection[0];
++          const float r = (1.0f - rawProjection[1]) / rawProjection[0];
++          const float b = (-1.0f - rawProjection[3]) / rawProjection[2];
++          const float t = (1.0f - rawProjection[3]) / rawProjection[2];
++          std::fprintf(stderr, "[ortho] l=%.2f r=%.2f t=%.2f b=%.2f viewport=%.1fx%.1f\n", l, r, t, b,
++                       xfmem.viewport.wd * 2.0f, -xfmem.viewport.ht * 2.0f);
++        }
++      }
++    }
++
+     g_stats.g2proj = m_projection_matrix;
+     g_stats.proj = rawProjection;
+   }
+diff --git a/Source/Core/VideoCommon/VideoConfig.cpp b/Source/Core/VideoCommon/VideoConfig.cpp
+index a619385..516cdc5 100644
+--- a/Source/Core/VideoCommon/VideoConfig.cpp
++++ b/Source/Core/VideoCommon/VideoConfig.cpp
+@@ -86,6 +86,7 @@ void VideoConfig::Refresh()
+   iUsePresentDrawable = Config::Get(Config::GFX_MTL_USE_PRESENT_DRAWABLE);
+ 
+   bWidescreenHack = Config::Get(Config::GFX_WIDESCREEN_HACK);
++  bWidescreenHackHUDFix = Config::Get(Config::GFX_WIDESCREEN_HACK_HUD_FIX);
+   aspect_mode = Config::Get(Config::GFX_ASPECT_RATIO);
+   custom_aspect_width = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH);
+   custom_aspect_height = Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT);
+diff --git a/Source/Core/VideoCommon/VideoConfig.h b/Source/Core/VideoCommon/VideoConfig.h
+index ec06f4a..fd78680 100644
+--- a/Source/Core/VideoCommon/VideoConfig.h
++++ b/Source/Core/VideoCommon/VideoConfig.h
+@@ -198,6 +198,7 @@ struct VideoConfig final
+   bool bVSync = false;
+   bool bVSyncActive = false;
+   bool bWidescreenHack = false;
++  bool bWidescreenHackHUDFix = true;
+   AspectMode aspect_mode{};
+   int custom_aspect_width = 1;
+   int custom_aspect_height = 1;
+diff --git a/module-template/CMakeLists.txt b/module-template/CMakeLists.txt
+index dac92e8..378a578 100644
+--- a/module-template/CMakeLists.txt
++++ b/module-template/CMakeLists.txt
+@@ -95,6 +95,15 @@ add_library(${MODULE_NAME} SHARED
+   "${GXRUNTIME_DIR}/src/core/cpu_interpreter_integer.c"
+   ${CHUNK_INPUTS})
+ 
++# RumbleRecomp: game-specific native code compiled into the module, e.g. the targets of
++# DOLRECOMP_HOOKS instruction hooks. RECOMPCORE_MODULE_EXTRA_SOURCES is a ';'-separated
++# list of absolute paths (environment or cache variable).
++set(RECOMPCORE_MODULE_EXTRA_SOURCES "$ENV{RECOMPCORE_MODULE_EXTRA_SOURCES}" CACHE STRING
++    "Extra C sources compiled into the module")
++if(RECOMPCORE_MODULE_EXTRA_SOURCES)
++  target_sources(${MODULE_NAME} PRIVATE ${RECOMPCORE_MODULE_EXTRA_SOURCES})
++endif()
++
+ set_target_properties(${MODULE_NAME} PROPERTIES
+   PREFIX ""
+   OUTPUT_NAME "${MODULE_NAME}"

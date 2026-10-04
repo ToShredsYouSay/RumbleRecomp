@@ -1,0 +1,107 @@
+diff --git a/src/runtime/dolphin_runtime.cpp b/src/runtime/dolphin_runtime.cpp
+index f9b5405..3758d0e 100644
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -3,6 +3,7 @@
+ #include "AudioCommon/AudioCommon.h"
+ #include "Common/Config/Config.h"
+ #include "Common/HookableEvent.h"
++#include "Common/MsgHandler.h"
+ #include "Common/StringUtil.h"
+ #include "Core/Boot/Boot.h"
+ #include "Core/Boot/BootManager.h"
+@@ -546,7 +547,18 @@ ModuleSource::AttachedDescriptor(const ModernGekkoModuleDesc *descriptor) {
+ 
+ Runtime::Runtime(std::unique_ptr<Impl> impl) : m_impl(std::move(impl)) {}
+ 
++// RumbleRecomp: route Dolphin panic/alert messages to stderr so headless boot
++// failures are visible instead of silently dropped.
++static bool StderrMsgAlertHandler(const char *caption, const char *text,
++                                  bool /*yes_no*/, Common::MsgType /*style*/) {
++  std::fprintf(stderr, "[dolphin alert] %s: %s\n", caption ? caption : "",
++               text ? text : "");
++  std::fflush(stderr);
++  return true;
++}
++
+ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
++  Common::RegisterMsgAlertHandler(&StderrMsgAlertHandler);
+   std::lock_guard lock(s_runtime_mutex);
+   if (s_runtime_active)
+     return {
+@@ -704,6 +716,7 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
+   recomp_source.host_call_contains = &ModManager::HostCallContains;
+   recomp_source.host_call_range_contains =
+       &ModManager::HostCallRangeContains;
++  recomp_source.host_call_active = &ModManager::HostCallActive;
+   recomp_source.host_call_user = impl->mods.get();
+   jit.SetStaticRecompModuleSource(std::move(recomp_source));
+ 
+@@ -758,7 +771,21 @@ RuntimeRunResult Runtime::Run() {
+   std::unique_ptr<BootParameters> boot;
+   {
+     std::lock_guard lock(s_runtime_mutex);
+-    if (s_boot_session_data)
++    // RumbleRecomp: WiiWare titles boot from a WAD (ES/NAND content), not a
++    // disc tree. MODERNGEKKO_BOOT_FILE overrides the boot target (e.g. a .wad)
++    // while the game root still identifies the game/module.
++    const char *boot_file = std::getenv("MODERNGEKKO_BOOT_FILE");
++    if (boot_file && *boot_file && s_boot_session_data)
++      boot = BootParameters::GenerateFromFile(std::string(boot_file),
++                                              std::move(*s_boot_session_data));
++    else if (boot_file && *boot_file && m_impl->config.load_state_path)
++      boot = BootParameters::GenerateFromFile(
++          std::string(boot_file),
++          BootSessionData(PathToString(*m_impl->config.load_state_path),
++                          DeleteSavestateAfterBoot::No));
++    else if (boot_file && *boot_file)
++      boot = BootParameters::GenerateFromFile(std::string(boot_file));
++    else if (s_boot_session_data)
+       boot = BootParameters::GenerateFromFile(
+           PathToString(m_impl->metadata.main_dol), std::move(*s_boot_session_data));
+     else if (m_impl->config.load_state_path)
+diff --git a/src/runtime/mod_loader.cpp b/src/runtime/mod_loader.cpp
+index 4b2345f..39ac864 100644
+--- a/src/runtime/mod_loader.cpp
++++ b/src/runtime/mod_loader.cpp
+@@ -630,6 +630,13 @@ const std::vector<LoadedModInfo> &ModManager::GetLoadedMods() const {
+ }
+ 
+ bool ModManager::HandlesAddress(std::uint32_t address) const {
++  // RumbleRecomp: this is reached from StaticRecompCore::IsHostCallAddress,
++  // called on every native dispatch (hundreds of millions per session) --
++  // profiled as a real hot spot even with zero mods loaded (--no-mods), since
++  // it always did full hash lookups regardless. Same emptiness check
++  // HasGuestInterception() already does, just as an early exit here too.
++  if (m_impl->patches.empty() && m_impl->hooks.empty() && m_impl->pending_returns.empty())
++    return false;
+   if (m_impl->patches.contains(address) || m_impl->hooks.contains(address))
+     return true;
+   return std::ranges::any_of(m_impl->pending_returns,
+@@ -641,6 +648,8 @@ bool ModManager::HandlesAddress(std::uint32_t address) const {
+ bool ModManager::HandlesRange(std::uint32_t start, std::uint32_t end) const {
+   if (start >= end)
+     return false;
++  if (m_impl->patches.empty() && m_impl->hooks.empty() && m_impl->pending_returns.empty())
++    return false;
+   const auto inside = [start, end](const auto &entry) {
+     return entry.first >= start && entry.first < end;
+   };
+@@ -682,8 +691,15 @@ bool ModManager::HostCallRangeContains(std::uint32_t start, std::uint32_t end,
+ }
+ 
+ bool ModManager::HostCallActive(void *user_data) {
+-  return user_data &&
+-         static_cast<ModManager *>(user_data)->HasGuestInterception();
++  if (!user_data)
++    return false;
++  const auto *manager = static_cast<ModManager *>(user_data);
++  // RumbleRecomp: StaticRecompCore polls this once per timing slice and drops
++  // the per-dispatch host-call hook entirely while it is false. Dispatch() also
++  // fires the one-shot "runtime_start" event, so stay active until that has
++  // happened for any mod that registered callbacks.
++  return manager->HasGuestInterception() ||
++         (!manager->m_impl->runtime_started && !manager->m_impl->callbacks.empty());
+ }
+ 
+ std::uint64_t ModManager::HostCallGeneration(void *user_data) {

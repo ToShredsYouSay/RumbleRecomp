@@ -1,0 +1,287 @@
+diff --git a/src/app/pipeline.c b/src/app/pipeline.c
+index 9526e45..808be7d 100644
+--- a/src/app/pipeline.c
++++ b/src/app/pipeline.c
+@@ -1320,6 +1320,16 @@ fail:
+ }
+ #endif
+ 
++// RumbleRecomp: code addresses found in DOL data sections (emit_dol_split).
++static u32* g_data_code_ptrs = NULL;
++static u32 g_data_code_ptr_count = 0;
++
++static int entry_target_compare(const void* left, const void* right) {
++    u32 a = *(const u32*)left;
++    u32 b = *(const u32*)right;
++    return a < b ? -1 : a > b;
++}
++
+ int emit_code_sections_split(const LoadedCodeSection* sections,
+                              u32 section_count, const char* output_path,
+                                     DolRecompCPU cpu, u32 entry_point, u32 jobs,
+@@ -1439,6 +1449,104 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
+     FunctionList funcs = {0};
+     SMCAnalysis smc = {0};
+ 
++    // RumbleRecomp: hand the emitter every chunk's start address up front, so
++    // a cross-chunk `bl` can call the target chunk's func_<start>() directly
++    // (emit_cross_chunk_call) instead of returning to the chassis for every
++    // call and every return. Chunk jobs run per section below, so the table
++    // has to cover all sections before the first one is emitted. The emitter
++    // was written for this but nothing called emit_set_chunk_table, leaving
++    // every cross-chunk call on the slow return-to-chassis path.
++    // DOLRECOMP_DIRECT_CHUNK_CALLS=0 restores the old behaviour.
++    u32* chunk_starts = NULL;
++    u32 chunk_start_count = 0;
++    {
++        const char* direct = getenv("DOLRECOMP_DIRECT_CHUNK_CALLS");
++        if (!direct || strcmp(direct, "0") != 0) {
++            u32 capacity = 0;
++            for (u32 s = 0; s < section_count; s++) {
++                if (sections[s].size == 0 || !sections[s].data)
++                    continue;
++                capacity += (sections[s].size / 4u + chunk_instructions - 1u) /
++                            chunk_instructions;
++            }
++            chunk_starts = capacity ? (u32*)malloc(capacity * sizeof(u32)) : NULL;
++            if (capacity && !chunk_starts) {
++                fprintf(stderr, "error: out of memory\n");
++                fclose(header);
++                fclose(manifest);
++                return 0;
++            }
++            for (u32 s = 0; s < section_count; s++) {
++                if (sections[s].size == 0 || !sections[s].data)
++                    continue;
++                u32 n = sections[s].size / 4u;
++                for (u32 start = 0; start < n; start += chunk_instructions)
++                    chunk_starts[chunk_start_count++] =
++                        sections[s].address + start * 4u;
++            }
++            // chunk_start_for() binary-searches, so keep the table sorted.
++            for (u32 i = 1; i < chunk_start_count; i++) {
++                u32 v = chunk_starts[i];
++                u32 j = i;
++                while (j > 0 && chunk_starts[j - 1] > v) {
++                    chunk_starts[j] = chunk_starts[j - 1];
++                    j--;
++                }
++                chunk_starts[j] = v;
++            }
++            emit_set_chunk_table(chunk_starts, chunk_start_count);
++            printf("direct cross-chunk calls: %u chunks\n", chunk_start_count);
++        }
++    }
++
++    // RumbleRecomp: collect every direct branch target in the program so
++    // emit_function can restrict each chunk's entry switch to real entry
++    // points (see emit_set_entry_targets). Enabled with
++    // DOLRECOMP_RESTRICT_ENTRIES=1; by default every instruction stays one.
++    u32* entry_targets = NULL;
++    u32 entry_target_count = 0;
++    {
++        // Opt-in: measured on Poke Rumble (4-player lobby) it did not speed
++        // up generated code (0.914 vs 0.927 real-time speed); guest state
++        // stays in memory for other reasons, so it is off by default.
++        const char* restrict_entries = getenv("DOLRECOMP_RESTRICT_ENTRIES");
++        if (restrict_entries && strcmp(restrict_entries, "1") == 0) {
++            u32 capacity = 0;
++            for (u32 s = 0; s < section_count; s++)
++                if (sections[s].size && sections[s].data)
++                    capacity += sections[s].size / 4u;
++            capacity += g_data_code_ptr_count;
++            entry_targets = (u32*)malloc((capacity ? capacity : 1u) * sizeof(u32));
++            if (!entry_targets) {
++                fprintf(stderr, "error: out of memory\n");
++                fclose(header);
++                fclose(manifest);
++                return 0;
++            }
++            for (u32 s = 0; s < section_count; s++) {
++                if (sections[s].size == 0 || !sections[s].data)
++                    continue;
++                u32 n = sections[s].size / 4u;
++                for (u32 i = 0; i < n; i++) {
++                    u32 addr = sections[s].address + i * 4u;
++                    PPCInst inst = ppc_decode(read_be32(sections[s].data + i * 4u), addr);
++                    if (inst.op == PPC_OP_B || inst.op == PPC_OP_BC)
++                        entry_targets[entry_target_count++] = inst.branch_target;
++                }
++            }
++            for (u32 i = 0; i < g_data_code_ptr_count; i++)
++                entry_targets[entry_target_count++] = g_data_code_ptrs[i];
++            qsort(entry_targets, entry_target_count, sizeof(u32), entry_target_compare);
++            u32 unique = 0;
++            for (u32 i = 0; i < entry_target_count; i++)
++                if (unique == 0 || entry_targets[unique - 1u] != entry_targets[i])
++                    entry_targets[unique++] = entry_targets[i];
++            entry_target_count = unique;
++            emit_set_entry_targets(entry_targets, entry_target_count);
++            printf("restricted chunk entries: %u branch targets\n", entry_target_count);
++        }
++    }
++
+     for (u32 s = 0; s < section_count; s++) {
+         const LoadedCodeSection* section = &sections[s];
+         if (section->size == 0 || !section->data)
+@@ -1641,6 +1749,10 @@ int emit_code_sections_split(const LoadedCodeSection* sections,
+     emit_footer(header);
+     smc_analysis_free(&smc);
+     function_list_free(&funcs);
++    emit_set_chunk_table(NULL, 0);
++    free(chunk_starts);
++    emit_set_entry_targets(NULL, 0);
++    free(entry_targets);
+     fprintf(manifest, "\n// %u C files\n", file_count);
+ 
+     fclose(header);
+@@ -1680,9 +1792,44 @@ int emit_dol_split(const DOLFile* dol, const char* output_path,
+         section->embedded_data_mode = EMBEDDED_DATA_DOL;
+     }
+ 
+-    return emit_code_sections_split(sections, section_count, output_path, cpu,
+-                                    dol->header.entry_point, jobs,
+-                                    local_chunks_dir, symbols, options);
++    // RumbleRecomp: every aligned word in a data section that points into a
++    // text section is a potential indirect-branch target: vtables, function
++    // pointer tables, switch jump tables. Hand them to the entry-point table
++    // (see emit_set_entry_targets) so functions reached only through a pointer
++    // stay chunk entry points. Over-inclusion only costs a little optimization.
++    u32 ptr_capacity = 0;
++    for (u32 i = 0; i < DOL_NUM_DATA; i++)
++        ptr_capacity += dol->header.data_sizes[i] / 4u;
++    g_data_code_ptrs = (u32*)malloc((ptr_capacity ? ptr_capacity : 1u) * sizeof(u32));
++    g_data_code_ptr_count = 0;
++    if (g_data_code_ptrs) {
++        for (u32 i = 0; i < DOL_NUM_DATA; i++) {
++            const u8* data = dol->header.data_sizes[i] ? dol_get_data_section(dol, (int)i) : NULL;
++            if (!data)
++                continue;
++            for (u32 off = 0; off + 4u <= dol->header.data_sizes[i]; off += 4u) {
++                u32 word = read_be32(data + off);
++                if (word & 3u)
++                    continue;
++                for (u32 s = 0; s < section_count; s++) {
++                    if (word >= sections[s].address &&
++                        word - sections[s].address < sections[s].size) {
++                        g_data_code_ptrs[g_data_code_ptr_count++] = word;
++                        break;
++                    }
++                }
++            }
++        }
++        printf("data words pointing into code: %u\n", g_data_code_ptr_count);
++    }
++
++    int result = emit_code_sections_split(sections, section_count, output_path, cpu,
++                                          dol->header.entry_point, jobs,
++                                          local_chunks_dir, symbols, options);
++    free(g_data_code_ptrs);
++    g_data_code_ptrs = NULL;
++    g_data_code_ptr_count = 0;
++    return result;
+ }
+ 
+ int emit_rpx_split(const RPXFile* rpx, const char* output_path,
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 45c3286..7ad159a 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -323,6 +323,36 @@ void emit_set_chunk_table(const u32* starts, u32 count) {
+     g_chunk_count = count ? count : 0;
+ }
+ 
++// RumbleRecomp: every direct branch target in the program, sorted and unique.
++// NULL means "no table": every instruction stays a chunk entry point (the old
++// behaviour). With a table, a chunk's entry switch lists only the addresses the
++// chassis can actually resume at: block leaders (which include call-return
++// sites and the instruction after anything that exits to the chassis) and any
++// address some branch in the program targets. Every other label is then
++// referenced only by in-chunk fallthrough, which lets the compiler keep guest
++// state in host registers across it. A dispatch to a non-entry pc (e.g. after
++// an FP-unavailable trap returns mid-block) executes nothing; the chassis
++// notices and interprets up to the next entry.
++static const u32* g_entry_targets = NULL;
++static u32 g_entry_target_count = 0;
++
++void emit_set_entry_targets(const u32* targets, u32 count) {
++    g_entry_targets = count ? targets : NULL;
++    g_entry_target_count = count ? count : 0;
++}
++
++static bool address_is_branch_target(u32 addr) {
++    u32 lo = 0, hi = g_entry_target_count;
++    while (lo < hi) {
++        u32 mid = lo + (hi - lo) / 2u;
++        if (g_entry_targets[mid] < addr)
++            lo = mid + 1u;
++        else
++            hi = mid;
++    }
++    return lo < g_entry_target_count && g_entry_targets[lo] == addr;
++}
++
+ // The chunk whose func_<start>() covers `addr`, or 0 if none does. Chunks tile
+ // the text sections but the first one does not start on the common stride, so
+ // this binary-searches rather than dividing.
+@@ -1666,6 +1696,35 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
+         break;
+ 
+     case PPC_OP_BCCTR:
++        // RumbleRecomp: an indirect call (bctrl: virtual calls, function
++        // pointers) gets the same treatment as a direct cross-chunk bl: run the
++        // callee through the module's own dispatcher and resume inline if it
++        // came back to the instruction after the call, instead of a
++        // return-to-chassis round trip for both the call and the return. A
++        // target the module does not cover leaves pc at the target and falls
++        // back to the chassis exactly as before.
++        if (inst->lk && g_chunk_starts &&
++            branch_target_is_local(func_start, func_end, inst->address + 4u)) {
++            u32 continuation = inst->address + 4u;
++            fprintf(out, "    {\n");
++            fprintf(out, "        u32 target = ctx->ctr & ~3u;\n");
++            emit_branch_condition(out, inst->bo, inst->bi);
++            fprintf(out, "        if (ctr_ok && cr_ok) {\n");
++            fprintf(out, "            ctx->lr = 0x%08Xu;\n", continuation);
++            fprintf(out, "            ctx->pc = target;\n");
++            fprintf(out, "            if (dolrecomp_call_enter()) {\n");
++            fprintf(out, "                int dolrecomp_indirect_call(CPUState* ctx, u32 address);\n");
++            fprintf(out, "                int handled = dolrecomp_indirect_call(ctx, target);\n");
++            fprintf(out, "                dolrecomp_call_leave();\n");
++            fprintf(out, "                if (!handled) { ctx->pc = target; return; }\n");
++            fprintf(out, "                if (ctx->pc == 0x%08Xu) goto label_%08X;\n",
++                    continuation, continuation);
++            fprintf(out, "            }\n");
++            fprintf(out, "            return;\n");
++            fprintf(out, "        }\n");
++            fprintf(out, "    }\n");
++            break;
++        }
+         emit_dynamic_branch(out, inst, "ctx->ctr & ~3u", false, func_start);
+         break;
+ 
+@@ -1923,6 +1982,12 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+     fprintf(out, "void func_%08X(CPUState* ctx) {\n", func_addr);
+     fprintf(out, "    switch (ctx->pc) {\n");
+     for (u32 i = 0; i < count; i++) {
++        // The first instruction after padding (embedded data) typically
++        // starts a function that may only be reached through a pointer.
++        bool after_padding = i > 0 && insts[i - 1u].embedded_data;
++        if (g_entry_targets && !cfg.leaders[i] && !cfg.return_targets[i] &&
++            !after_padding && !address_is_branch_target(insts[i].address))
++            continue;
+         fprintf(out, "    case 0x%08Xu: goto label_%08X;\n",
+                 insts[i].address, insts[i].address);
+     }
+diff --git a/src/backend/emitter.h b/src/backend/emitter.h
+index 39d8f3c..4354fd6 100644
+--- a/src/backend/emitter.h
++++ b/src/backend/emitter.h
+@@ -22,6 +22,7 @@ void emit_header_for_cpu(FILE* out, DolRecompCPU cpu);
+ // runtime that validates mutable guest code there. Call before worker emission;
+ // passing count == 0 restores the safe return-to-chassis form.
+ void emit_set_chunk_table(const u32* starts, u32 count);
++void emit_set_entry_targets(const u32* targets, u32 count);
+ 
+ // emit a single recompiled function as C code
+ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr);

@@ -1,0 +1,325 @@
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+index a6f7686..9a44c5e 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+@@ -360,6 +360,10 @@ void StaticRecompCore::LoadModule()
+                                m_library.GetSymbolAddress("staticrecomp_set_direct_calls")) :
+                            nullptr;
+   m_direct_calls_state = -1;
++  m_poll_native_scene = m_library.IsOpen() ?
++                            reinterpret_cast<int (*)()>(
++                                m_library.GetSymbolAddress("staticrecomp_poll_native_scene")) :
++                            nullptr;
+   m_set_hud_anchor = m_library.IsOpen() ?
+                          reinterpret_cast<void (*)(float, float)>(
+                              m_library.GetSymbolAddress("staticrecomp_set_hud_anchor")) :
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index cc214b8..5579276 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -177,6 +177,10 @@ private:
+   // RumbleRecomp: optional module export receiving the widescreen HUD anchor offsets
+   // (module_hooks/rumble_hud.c). Updated every timing slice.
+   void (*m_set_hud_anchor)(float, float) = nullptr;
++  // RumbleRecomp: optional module export reporting native-aspect-only scenes
++  // (module_hooks/rumble_hud.c); drives g_rr_native_aspect_scene.
++  int (*m_poll_native_scene)() = nullptr;
++  u64 m_native_scene_last_ms = 0;
+   u64 m_non_entry_dispatches = 0;
+   u32 m_host_call_passthrough_pc = 0;
+   bool m_host_call_passthrough = false;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+index 7374db9..f030d36 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -13,6 +13,7 @@
+ #include "Core/HW/SystemTimers.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
++#include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <memory>
+@@ -151,6 +152,20 @@ void StaticRecompCore::Run()
+       }
+       m_set_hud_anchor(dx, dy);
+     }
++    // Native-aspect scenes: the module reports each time such a layout is laid out; hold the
++    // presenter's pillarbox for 150 ms after the last report so it does not flicker between
++    // frames and releases shortly after the scene ends.
++    if (m_poll_native_scene)
++    {
++      const u64 now_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
++                                              std::chrono::steady_clock::now().time_since_epoch())
++                                              .count());
++      if (m_poll_native_scene())
++        m_native_scene_last_ms = now_ms;
++      const bool active = g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
++                          m_native_scene_last_ms != 0 && now_ms - m_native_scene_last_ms < 150;
++      g_rr_native_aspect_scene.store(active, std::memory_order_relaxed);
++    }
+     // Direct cross-chunk calls bypass every per-dispatch check below; allow
+     // them only while none of those checks has anything to catch.
+     if (m_set_direct_calls)
+diff --git a/Source/Core/VideoCommon/PostProcessing.cpp b/Source/Core/VideoCommon/PostProcessing.cpp
+index 92f7c1f..bc3eadb 100644
+--- a/Source/Core/VideoCommon/PostProcessing.cpp
++++ b/Source/Core/VideoCommon/PostProcessing.cpp
+@@ -605,6 +605,88 @@ void PostProcessing::BlitFromTexture(const MathUtil::Rectangle<int>& dst,
+   }
+ }
+ 
++void PostProcessing::BlitSidePanel(const MathUtil::Rectangle<int>& dst,
++                                   const MathUtil::Rectangle<int>& src,
++                                   const AbstractTexture* src_tex, bool left)
++{
++  const AbstractTextureFormat format = g_gfx->GetCurrentFramebuffer()->GetColorFormat();
++  if (!m_default_vertex_shader || format == AbstractTextureFormat::Undefined || dst.GetWidth() <= 0)
++    return;
++  const int side = left ? 0 : 1;
++  if (m_side_panel_format != format)
++  {
++    m_side_panel_pipeline[0].reset();
++    m_side_panel_pipeline[1].reset();
++    m_side_panel_format = format;
++  }
++  if (!m_side_panel_shader[side])
++  {
++    std::ostringstream ss;
++    ss << GetHeader(false);
++    ss << (left ? "#define RR_LEFT 1\n" : "#define RR_LEFT 0\n");
++    ss << R"(
++void main()
++{
++  float2 uv = v_tex0.xy;
++  // 0 at the edge that touches the picture, 1 at the outer window edge.
++  float t = clamp((uv.x - src_rect.x) / src_rect.z, 0.0, 1.0);
++  float outer = RR_LEFT != 0 ? (1.0 - t) : t;
++  // Wide box blur over the edge strip (7x7 taps) so the stretched strip reads as ambient
++  // colour, not a smeared copy of the picture.
++  // 11x11 taps: horizontally across the whole strip, vertically +-12% of the height, with a
++  // half-step stagger on alternate rows so sparse sampling does not show as horizontal bands.
++  float2 stp = float2(src_rect.z / 10.0, src_rect.w / 42.0);
++  float2 lo = src_rect.xy;
++  float2 hi = src_rect.xy + src_rect.zw;
++  float4 acc = float4(0.0, 0.0, 0.0, 0.0);
++  for (int j = -5; j <= 5; j++)
++  {
++    float stagger = (j % 2 == 0) ? 0.0 : 0.5;
++    for (int i = -5; i <= 5; i++)
++    {
++      float2 p = clamp(uv + float2(float(i) + stagger, float(j)) * stp, lo, hi);
++      acc += texture(samp0, float3(p, v_tex0.z));
++    }
++  }
++  acc = acc / 121.0;
++  float dim = mix(0.42, 0.06, smoothstep(0.0, 1.0, outer));
++  ocol0 = float4(acc.rgb * dim, 1.0);
++}
++)";
++    m_side_panel_shader[side] =
++        g_gfx->CreateShaderFromSource(ShaderStage::Pixel, ss.str(), nullptr,
++                                      left ? "Side panel pixel shader (left)" :
++                                             "Side panel pixel shader (right)");
++    if (!m_side_panel_shader[side])
++      return;
++  }
++  if (!m_side_panel_pipeline[side])
++  {
++    AbstractPipelineConfig config = {};
++    config.vertex_shader = m_default_vertex_shader.get();
++    config.geometry_shader = nullptr;
++    config.pixel_shader = m_side_panel_shader[side].get();
++    config.rasterization_state = RenderState::GetNoCullRasterizationState(PrimitiveType::Triangles);
++    config.depth_state = RenderState::GetNoDepthTestingDepthState();
++    config.blending_state = RenderState::GetNoBlendingBlendState();
++    config.framebuffer_state = RenderState::GetColorFramebufferState(format);
++    config.usage = AbstractPipelineUsage::Utility;
++    m_side_panel_pipeline[side] = g_gfx->CreatePipeline(config);
++    if (!m_side_panel_pipeline[side])
++      return;
++  }
++
++  g_gfx->SetSamplerState(0, RenderState::GetLinearSamplerState());
++  g_gfx->SetTexture(0, src_tex);
++  std::vector<u8> uniforms(CalculateUniformsSize(false));
++  FillUniformBuffer(src, src_tex, 0, dst, g_presenter->GetTargetRectangle(), uniforms.data(),
++                    false, false);
++  g_vertex_manager->UploadUtilityUniforms(uniforms.data(), static_cast<u32>(uniforms.size()));
++  g_gfx->SetViewportAndScissor(g_gfx->ConvertFramebufferRectangle(dst, g_gfx->GetCurrentFramebuffer()));
++  g_gfx->SetPipeline(m_side_panel_pipeline[side].get());
++  g_gfx->Draw(0, 3);
++}
++
+ std::string PostProcessing::GetUniformBufferHeader(bool user_post_process) const
+ {
+   std::ostringstream ss;
+diff --git a/Source/Core/VideoCommon/PostProcessing.h b/Source/Core/VideoCommon/PostProcessing.h
+index 30a0cac..3ef3227 100644
+--- a/Source/Core/VideoCommon/PostProcessing.h
++++ b/Source/Core/VideoCommon/PostProcessing.h
+@@ -113,6 +113,12 @@ public:
+   void BlitFromTexture(const MathUtil::Rectangle<int>& dst, const MathUtil::Rectangle<int>& src,
+                        const AbstractTexture* src_tex, int src_layer = -1);
+ 
++  // RumbleRecomp: draws a blurred, darkened copy of `src` (an edge strip of the picture) into
++  // `dst`, fading darker toward the outer window edge: the side panels shown around
++  // native-aspect-only scenes. `left` selects which side is the outer edge.
++  void BlitSidePanel(const MathUtil::Rectangle<int>& dst, const MathUtil::Rectangle<int>& src,
++                     const AbstractTexture* src_tex, bool left);
++
+   bool IsColorCorrectionActive() const;
+   bool NeedsIntermediaryBuffer() const;
+ 
+@@ -150,5 +156,11 @@ protected:
+   std::vector<u8> m_uniform_staging_buffer;
+ 
+   AbstractTextureFormat m_framebuffer_format = AbstractTextureFormat::Undefined;
++
++  // RumbleRecomp side panels (index 0 = left, 1 = right), built lazily for the current
++  // framebuffer format.
++  std::unique_ptr<AbstractShader> m_side_panel_shader[2];
++  std::unique_ptr<AbstractPipeline> m_side_panel_pipeline[2];
++  AbstractTextureFormat m_side_panel_format = AbstractTextureFormat::Undefined;
+ };
+ }  // namespace VideoCommon
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 7c62730..83d8362 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -26,6 +26,9 @@
+ 
+ std::unique_ptr<VideoCommon::Presenter> g_presenter;
+ 
++// RumbleRecomp: see VideoConfig.h.
++std::atomic<bool> g_rr_native_aspect_scene{false};
++
+ namespace VideoCommon
+ {
+ // Stretches the native/internal analog resolution aspect ratio from ~4:3 to ~16:9
+@@ -483,6 +486,11 @@ float Presenter::CalculateDrawAspectRatio(bool allow_stretch) const
+   if (!allow_stretch && aspect_mode == AspectMode::Stretch)
+     aspect_mode = AspectMode::Auto;
+ 
++  // RumbleRecomp: native-aspect scenes are drawn (and dumped/screenshotted) at the game's own
++  // aspect, whatever the window or custom setting is.
++  if (m_native_aspect_scene)
++    aspect_mode = AspectMode::Auto;
++
+   // If stretch is enabled, we prefer the aspect ratio of the window.
+   if (aspect_mode == AspectMode::Stretch)
+   {
+@@ -703,12 +711,17 @@ std::tuple<float, float> Presenter::ApplyStandardAspectCrop(float width, float h
+ 
+ void Presenter::UpdateDrawRectangle()
+ {
++  // RumbleRecomp: a scene flagged as native-aspect-only is drawn unwidened at the game's own
++  // aspect (pillarboxed; CalculateDrawAspectRatio honours the flag); Present() fills the sides
++  // with blurred panels.
++  m_native_aspect_scene =
++      g_ActiveConfig.bWidescreenHack && g_rr_native_aspect_scene.load(std::memory_order_relaxed);
+   const float draw_aspect_ratio = CalculateDrawAspectRatio();
+ 
+   // Update aspect ratio hack values
+   // Won't take effect until next frame
+   // Don't know if there is a better place for this code so there isn't a 1 frame delay
+-  if (g_ActiveConfig.bWidescreenHack)
++  if (g_ActiveConfig.bWidescreenHack && !m_native_aspect_scene)
+   {
+     const auto& vi = Core::System::GetInstance().GetVideoInterface();
+     float source_aspect_ratio = vi.GetAspectRatio();
+@@ -940,6 +953,29 @@ void Presenter::Present(PresentInfo* present_info)
+     MathUtil::Rectangle<int> render_source_rc = AdjustForCustomCrop(m_xfb_rect);
+     AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
+                                 m_backbuffer_height);
++    // RumbleRecomp: side panels for native-aspect scenes: a blurred, darkened continuation
++    // of each edge of the picture that fades toward the outer window edge.
++    if (m_native_aspect_scene && g_ActiveConfig.stereo_mode == StereoMode::Off)
++    {
++      const int src_strip = std::max(1, render_source_rc.GetWidth() / 5);
++      if (render_target_rc.left > 0)
++      {
++        const MathUtil::Rectangle<int> dst{0, 0, render_target_rc.left, m_backbuffer_height};
++        const MathUtil::Rectangle<int> src{render_source_rc.left, render_source_rc.top,
++                                           render_source_rc.left + src_strip,
++                                           render_source_rc.bottom};
++        m_post_processor->BlitSidePanel(dst, src, m_xfb_entry->texture.get(), true);
++      }
++      if (render_target_rc.right < m_backbuffer_width)
++      {
++        const MathUtil::Rectangle<int> dst{render_target_rc.right, 0, m_backbuffer_width,
++                                           m_backbuffer_height};
++        const MathUtil::Rectangle<int> src{render_source_rc.right - src_strip,
++                                           render_source_rc.top, render_source_rc.right,
++                                           render_source_rc.bottom};
++        m_post_processor->BlitSidePanel(dst, src, m_xfb_entry->texture.get(), false);
++      }
++    }
+     RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
+   }
+ 
+diff --git a/Source/Core/VideoCommon/Present.h b/Source/Core/VideoCommon/Present.h
+index 91ba870..d85c267 100644
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -108,6 +108,9 @@ public:
+   void DoState(PointerWrap& p);
+ 
+   const MathUtil::Rectangle<int>& GetTargetRectangle() const { return m_target_rectangle; }
++  // RumbleRecomp: true while the current frame is presented at native aspect with side panels
++  // (see g_rr_native_aspect_scene).
++  bool IsNativeAspectScene() const { return m_native_aspect_scene; }
+ 
+ private:
+   // Fetches the XFB texture from the texture cache.
+@@ -148,6 +151,7 @@ private:
+   // Width and height correspond to the final output resolution.
+   // Offsets imply black borders (if the window aspect ratio doesn't match the game's one).
+   MathUtil::Rectangle<int> m_target_rectangle = {};
++  mutable bool m_native_aspect_scene = false;
+ 
+   u32 m_auto_resolution_scale = 1;
+ 
+diff --git a/Source/Core/VideoCommon/VertexShaderManager.cpp b/Source/Core/VideoCommon/VertexShaderManager.cpp
+index cfcd706..643ecb0 100644
+--- a/Source/Core/VideoCommon/VertexShaderManager.cpp
++++ b/Source/Core/VideoCommon/VertexShaderManager.cpp
+@@ -113,9 +113,13 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
+     // HUD) use those, while full-screen composites of off-screen passes (e.g. Pokémon
+     // Rumble's character outlines) use a 0..width projection and must keep covering the
+     // whole screen.
++    // Only layout-sized spaces qualify (half-width >= 100 units, i.e. |raw[0]| <= 0.01): HUD
++    // layouts are authored in screen-pixel-like units (Poke Rumble: +-324). Full-screen
++    // composites drawn in a unit square (+-0.5: the stage-clear zoom snapshot, the pause
++    // dimming) are already the full window's shape and must keep covering it.
+     if (g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
+         std::abs(xfmem.viewport.wd * 2.0f) >= static_cast<float>(EFB_WIDTH) - 1.0f &&
+-        std::abs(rawProjection[1]) < 1e-3f)
++        std::abs(rawProjection[1]) < 1e-3f && std::abs(rawProjection[0]) <= 0.01f)
+     {
+       // Hor+ (window wider than the game): fAspectRatioHackW < 1. Vert+ (taller):
+       // fAspectRatioHackH < 1. Either way the HUD keeps its proportions and its size
+diff --git a/Source/Core/VideoCommon/VideoConfig.h b/Source/Core/VideoCommon/VideoConfig.h
+index fd78680..a3ab0d2 100644
+--- a/Source/Core/VideoCommon/VideoConfig.h
++++ b/Source/Core/VideoCommon/VideoConfig.h
+@@ -9,6 +9,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <optional>
+ #include <string>
+ #include <vector>
+@@ -403,6 +404,11 @@ struct VideoConfig final
+ };
+ 
+ extern VideoConfig g_Config;
++// RumbleRecomp: set (from the emulation thread) while the game shows a scene that is only
++// authored for its native aspect. With the widescreen hack on, the presenter then renders
++// that scene unwidened at the native aspect and fills the rest of the window with blurred,
++// darkened side panels instead of showing past the scene's edges.
++extern std::atomic<bool> g_rr_native_aspect_scene;
+ extern VideoConfig g_ActiveConfig;
+ 
+ // Called every frame.

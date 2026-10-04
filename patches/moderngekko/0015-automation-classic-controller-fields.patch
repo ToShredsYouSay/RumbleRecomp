@@ -1,0 +1,28 @@
+--- a/tools/automation_protocol.cpp
++++ b/tools/automation_protocol.cpp
+@@ -62,6 +62,25 @@ constexpr std::array kPadFields = {
+     PadField{"nunchuk_z", ControlID::NUNCHUK_Z_BUTTON, 0.0, 1.0},
+     PadField{"nunchuk_x", ControlID::NUNCHUK_STICK_X, -1.0, 1.0},
+     PadField{"nunchuk_y", ControlID::NUNCHUK_STICK_Y, -1.0, 1.0},
++    PadField{"classic_a", ControlID::CLASSIC_A_BUTTON, 0.0, 1.0},
++    PadField{"classic_b", ControlID::CLASSIC_B_BUTTON, 0.0, 1.0},
++    PadField{"classic_x", ControlID::CLASSIC_X_BUTTON, 0.0, 1.0},
++    PadField{"classic_y", ControlID::CLASSIC_Y_BUTTON, 0.0, 1.0},
++    PadField{"classic_zl", ControlID::CLASSIC_ZL_BUTTON, 0.0, 1.0},
++    PadField{"classic_zr", ControlID::CLASSIC_ZR_BUTTON, 0.0, 1.0},
++    PadField{"classic_plus", ControlID::CLASSIC_PLUS_BUTTON, 0.0, 1.0},
++    PadField{"classic_minus", ControlID::CLASSIC_MINUS_BUTTON, 0.0, 1.0},
++    PadField{"classic_home", ControlID::CLASSIC_HOME_BUTTON, 0.0, 1.0},
++    PadField{"classic_dpad_up", ControlID::CLASSIC_DPAD_UP, 0.0, 1.0},
++    PadField{"classic_dpad_down", ControlID::CLASSIC_DPAD_DOWN, 0.0, 1.0},
++    PadField{"classic_dpad_left", ControlID::CLASSIC_DPAD_LEFT, 0.0, 1.0},
++    PadField{"classic_dpad_right", ControlID::CLASSIC_DPAD_RIGHT, 0.0, 1.0},
++    PadField{"classic_l", ControlID::CLASSIC_L_DIGITAL, 0.0, 1.0},
++    PadField{"classic_r", ControlID::CLASSIC_R_DIGITAL, 0.0, 1.0},
++    PadField{"classic_lx", ControlID::CLASSIC_LEFT_STICK_X, -1.0, 1.0},
++    PadField{"classic_ly", ControlID::CLASSIC_LEFT_STICK_Y, -1.0, 1.0},
++    PadField{"classic_rx", ControlID::CLASSIC_RIGHT_STICK_X, -1.0, 1.0},
++    PadField{"classic_ry", ControlID::CLASSIC_RIGHT_STICK_Y, -1.0, 1.0},
+ };
+ 
+ std::string Trim(std::string_view value)

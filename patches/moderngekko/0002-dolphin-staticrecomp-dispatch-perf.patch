@@ -1,0 +1,373 @@
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+index e3581cc..6a997d6 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.cpp
+@@ -148,6 +148,8 @@ void StaticRecompCore::Init()
+   g_static_recomp_core = this;
+   RefreshConfig();
+   m_collect_dispatch_samples = std::getenv("STATICRECOMP_DISPATCH_SAMPLES") != nullptr;
++  if (const char* pc_profile = std::getenv("STATICRECOMP_PC_PROFILE"); pc_profile && *pc_profile)
++    StartPcProfiler(pc_profile);
+   const char* fallback_override = std::getenv("STATICRECOMP_FALLBACK_RANGES");
+   std::istringstream fallback_ranges(fallback_override ? fallback_override :
+                                                          Config::Get(Config::MAIN_STATICRECOMP_FALLBACK_RANGES));
+@@ -198,8 +200,55 @@ void StaticRecompCore::Init()
+   }
+ }
+ 
++// RumbleRecomp: guest-pc sampling profiler. Generated code stores ctx->pc at
++// block leaders and before memory accesses, so a racy read of m_guest.pc from
++// another thread lands within a block or two of what the CPU thread is running
++// which is enough to attribute time to guest functions, which a host RIP sampler
++// cannot do inside a 16 KiB chunk function. Waits STATICRECOMP_PC_PROFILE_START_MS
++// (default 6000) after core init, samples for STATICRECOMP_PC_PROFILE_MS
++// (default 6000), then writes "pc count" lines, hottest first.
++void StaticRecompCore::StartPcProfiler(const char* path)
++{
++  const auto env_ms = [](const char* name, long fallback) {
++    const char* value = std::getenv(name);
++    return value && *value ? std::strtol(value, nullptr, 10) : fallback;
++  };
++  const long start_ms = env_ms("STATICRECOMP_PC_PROFILE_START_MS", 6000);
++  const long duration_ms = env_ms("STATICRECOMP_PC_PROFILE_MS", 6000);
++  std::string out_path = path;
++  m_pc_profiler = std::make_unique<std::jthread>([this, start_ms, duration_ms,
++                                                  out_path](std::stop_token stop) {
++    const auto start = std::chrono::steady_clock::now() + std::chrono::milliseconds(start_ms);
++    while (!stop.stop_requested() && std::chrono::steady_clock::now() < start)
++      std::this_thread::sleep_for(std::chrono::milliseconds(10));
++    std::unordered_map<u32, u64> hist;
++    u64 total = 0;
++    const auto end = start + std::chrono::milliseconds(duration_ms);
++    while (!stop.stop_requested() && std::chrono::steady_clock::now() < end)
++    {
++      const u32 pc = *reinterpret_cast<volatile const u32*>(&m_guest.pc);
++      ++hist[pc];
++      ++total;
++      std::this_thread::sleep_for(std::chrono::microseconds(500));
++    }
++    std::vector<std::pair<u32, u64>> sorted(hist.begin(), hist.end());
++    std::sort(sorted.begin(), sorted.end(),
++              [](const auto& a, const auto& b) { return a.second > b.second; });
++    if (std::FILE* file = std::fopen(out_path.c_str(), "w"))
++    {
++      std::fprintf(file, "# samples %llu\n", static_cast<unsigned long long>(total));
++      for (const auto& [pc, count] : sorted)
++        std::fprintf(file, "%08x %llu\n", pc, static_cast<unsigned long long>(count));
++      std::fclose(file);
++    }
++    std::fprintf(stderr, "[staticrecomp] pc profile: %llu samples -> %s\n",
++                 static_cast<unsigned long long>(total), out_path.c_str());
++  });
++}
++
+ void StaticRecompCore::Shutdown()
+ {
++  m_pc_profiler.reset();
+   g_static_recomp_core = nullptr;
+   std::fprintf(stderr,
+                "[staticrecomp] shutdown: native=%llu fallback=%llu native_exc=%llu hook_fb=%llu "
+@@ -209,6 +258,8 @@ void StaticRecompCore::Shutdown()
+                (unsigned long long)m_hook_fallback_instructions, m_failed_chunks,
+                (unsigned long long)m_verifications, (unsigned long long)m_reverify_events,
+                (unsigned long long)m_bursts, (unsigned long long)m_charged_cycles);
++  std::fprintf(stderr, "[staticrecomp] non-entry dispatches (interpreted): %llu\n",
++               (unsigned long long)m_non_entry_dispatches);
+   std::vector<std::pair<u32, u64>> dispatch_samples(m_dispatch_samples.begin(),
+                                                     m_dispatch_samples.end());
+   std::sort(dispatch_samples.begin(), dispatch_samples.end(),
+@@ -304,6 +355,11 @@ void StaticRecompCore::LoadModule()
+ 
+   m_module = desc;
+   m_module_active = (desc != nullptr);
++  m_set_direct_calls = m_library.IsOpen() ?
++                           reinterpret_cast<void (*)(int)>(
++                               m_library.GetSymbolAddress("staticrecomp_set_direct_calls")) :
++                           nullptr;
++  m_direct_calls_state = -1;
+   m_has_rel_modules = desc->num_rel_modules != 0;
+   m_chunk_state.assign(desc->num_chunk_ranges, CHUNK_UNVERIFIED);
+   m_chunk_host_call_state.assign(desc->num_chunk_ranges, 0);
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+index d084fea..3685283 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -3,7 +3,9 @@
+ 
+ #pragma once
+ 
++#include <memory>
+ #include <string>
++#include <thread>
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
+@@ -165,6 +167,14 @@ private:
+   StaticRecompModuleSource m_module_source;
+   const StaticRecompModuleDesc* m_module = nullptr;
+   bool m_module_active = false;
++  // RumbleRecomp: optional module export gating DolRecomp's cross-chunk direct
++  // calls (see module_export.c). -1 = not yet set this run.
++  void (*m_set_direct_calls)(int) = nullptr;
++  int m_direct_calls_state = -1;
++  // RumbleRecomp: set when a dispatch hit a non-entry pc and executed nothing;
++  // the next Run iteration interprets one instruction instead.
++  bool m_interpret_next = false;
++  u64 m_non_entry_dispatches = 0;
+   u32 m_host_call_passthrough_pc = 0;
+   bool m_host_call_passthrough = false;
+   std::unique_ptr<JitBase> m_fallback_jit;
+@@ -175,6 +185,10 @@ private:
+   u64 m_hook_fallback_instructions = 0;
+   u64 m_timebase_cycle_remainder = 0;
+   std::unordered_map<u32, u64> m_dispatch_samples;
++  // RumbleRecomp: STATICRECOMP_PC_PROFILE=<file> starts a thread that samples
++  // the guest pc ~1 kHz (within a time window) and writes a histogram to <file>.
++  std::unique_ptr<std::jthread> m_pc_profiler;
++  void StartPcProfiler(const char* path);
+   u64 m_bursts = 0;          // SyncIn..SyncOut native runs (diagnostic)
+   u64 m_charged_cycles = 0;  // cycles flushed from module charges (diagnostic)
+ 
+@@ -205,6 +219,21 @@ private:
+   int GetAddressLookupIndex(u32 address) const;
+   void InitLookupTable(u32 ram_size, u32 exram_size);
+ 
++  // RumbleRecomp: coalesce consecutive per-cache-line dcbf/dcbst/dcbi calls
++  // (the compiled form of a guest DCFlushRange/DCInvalidateRange loop, one
++  // helper call per 32-byte line) into a single OnICacheInvalidate covering
++  // the whole run, instead of paying the chunk-lookup + fallback-JIT-notify
++  // cost per line. A guest loop like this never dispatches mid-loop, so
++  // deferring is safe as long as the pending range is flushed before any
++  // code that reads chunk state runs: FlushPendingCacheInvalidate() is
++  // called at the top of ChunkIndexOf, which every dispatch check goes
++  // through, so nothing can observe a stale chunk_state.
++  bool m_has_pending_cache_invalidate = false;
++  u32 m_pending_cache_start = 0;
++  u32 m_pending_cache_end = 0;  // exclusive
++  void FlushPendingCacheInvalidate();
++  void QueueCacheInvalidate(u32 address, u32 length);
++
+   // Dispatch locality: most control transfers stay inside one chunk, so the
+   // last hit short-circuits the chunk binary search on the hot path.
+   mutable u32 m_last_chunk_index = 0;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+index 7b3d845..3a2d0d1 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Hooks.cpp
+@@ -341,7 +341,14 @@ void StaticRecompCore::HookCacheControl(CPUState* cpu, u8 operation, u32 ea, u32
+ 
+   if (!ppc.m_enable_dcache)
+   {
+-    core->m_system.GetJitInterface().InvalidateICacheLine(ea);
++    // RumbleRecomp: a compiled DCFlushRange/DCInvalidateRange loop calls
++    // this once per 32-byte cache line (measured from the game's
++    // own cache loops): queue instead of invalidating immediately so
++    // consecutive lines coalesce into one chunk-state update. Resolved by
++    // FlushPendingCacheInvalidate(), guaranteed to run before this dispatch
++    // returns (StaticRecompCore_Run.cpp) or before the next chunk lookup
++    // (ChunkIndexOf), so nothing observes a stale chunk_state.
++    core->QueueCacheInvalidate(ea, 32u);
+     return;
+   }
+ 
+@@ -396,7 +403,10 @@ void StaticRecompCore::HookInstructionFallback(CPUState* cpu, u32 raw, u32 cia)
+       if (xo == 982u)
+         ppc.iCache.Invalidate(system.GetMemory(), system.GetJitInterface(), ea);
+       else
+-        system.GetJitInterface().InvalidateICacheLine(ea);
++        // RumbleRecomp: same coalescing as HookCacheControl's dcache-off
++        // path (see the comment there). Flushed before this dispatch
++        // returns or the next chunk lookup, whichever comes first.
++        core->QueueCacheInvalidate(ea, 32u);
+       // These bypass SingleStepInner, so charge Dolphin's PPCTables cost
+       // here (icbi 4, dcbf/dcbst/dcbi 5); their emitted block cost is zero.
+       ppc.downcount -= (xo == 982u) ? 4 : 5;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+index d91ec2d..8a53be0 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -120,6 +120,32 @@ void StaticRecompCore::Run()
+   while (*state_ptr == CPU::State::Running)
+   {
+     core_timing.Advance();
++    // RumbleRecomp: every native dispatch otherwise pays for the host-call hook
++    // twice (IsHostCallAddress in this loop and ppc_host_call inside the
++    // module's dolrecomp_call), each an indirect call into the mod manager
++    // doing hash lookups, even with no mod intercepting anything. Drop the hook
++    // while the mod manager reports nothing to intercept; re-checked every
++    // timing slice, so a mod that starts intercepting later is picked up.
++    if (m_module_source.host_call)
++    {
++      const bool active =
++          !m_module_source.host_call_active ||
++          m_module_source.host_call_active(m_module_source.host_call_user);
++      m_guest.host_call = active ? HookHostCall : nullptr;
++    }
++    // Direct cross-chunk calls bypass every per-dispatch check below; allow
++    // them only while none of those checks has anything to catch.
++    if (m_set_direct_calls)
++    {
++      const int want = !m_guest.host_call && !lockstep_enabled && !dispatch_trace &&
++                       m_forced_fallback_ranges.empty() && !m_has_rel_modules &&
++                       m_failed_chunks == 0;
++      if (want != m_direct_calls_state)
++      {
++        m_set_direct_calls(want);
++        m_direct_calls_state = want;
++      }
++    }
+     const std::string current_game_id = SConfig::GetInstance().GetGameID();
+     m_module_active = m_module && (current_game_id.empty() || current_game_id == m_module->game_id);
+ 
+@@ -127,8 +153,14 @@ void StaticRecompCore::Run()
+     {
+       // MSR.FP needs no gate here: generated FPU instructions raise the
+       // FP-unavailable exception themselves (ppc_fp_available).
+-      if (m_module_active && DispatchableAt(ppc.pc) &&
+-          !(m_guest.host_call && IsHostCallAddress(ppc.pc)))
++      if (m_interpret_next)
++      {
++        m_interpret_next = false;
++        ppc.downcount -= interpreter.SingleStepInner();
++        ++m_fallback_steps;
++      }
++      else if (m_module_active && DispatchableAt(ppc.pc) &&
++               !(m_guest.host_call && IsHostCallAddress(ppc.pc)))
+       {
+         SyncIn();
+         ++m_bursts;
+@@ -156,6 +188,35 @@ void StaticRecompCore::Run()
+             ResolveNativeAddress(runtime_dispatch_address, &linked_dispatch_address, nullptr);
+           m_guest.pc = linked_dispatch_address;
+           m_module->dispatch(&m_guest, linked_dispatch_address);
++          // RumbleRecomp: a module built with restricted chunk entries (see
++          // DolRecomp emit_set_entry_targets) executes nothing when asked to
++          // start at a pc that is not an entry point, for example an FP-unavailable
++          // trap handler returning to the middle of a block. Nothing ran if pc
++          // is unchanged, no cycles were charged and no exception was raised.
++          // Leave the burst and let the interpreter step once; the next
++          // iteration retries native dispatch at the following pc.
++          if (m_guest.pc == linked_dispatch_address && m_guest.downcount == 0 &&
++              !m_guest.exception)
++          {
++            if (m_has_pending_cache_invalidate)
++              FlushPendingCacheInvalidate();
++            m_guest.pc = runtime_dispatch_address;
++            m_interpret_next = true;
++            if (m_collect_dispatch_samples)
++              ++m_dispatch_samples[runtime_dispatch_address | 1u];  // low bit tags non-entry
++            ++m_non_entry_dispatches;
++            break;
++          }
++          // RumbleRecomp: a compiled dcbf/dcbst/dcbi flush-loop (e.g. guest
++          // DCFlushRange) calls HookCacheControl once per 32-byte line, all
++          // within this one dispatch. Those calls only queued a pending
++          // range (see QueueCacheInvalidate); resolve it now, before the
++          // fast_dispatchable_at() chunk-state read below or any later
++          // dispatch can observe it. This must run every dispatch, not just
++          // when a range was queued, since fast_dispatchable_at reads
++          // m_chunk_state directly and does not go through ChunkIndexOf.
++          if (m_has_pending_cache_invalidate)
++            FlushPendingCacheInvalidate();
+           if (m_has_rel_modules)
+             m_guest.pc = TranslateRelAddress(m_guest.pc);
+           ++m_native_dispatches;
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
+index 491c57e..44d21dd 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_SMC.cpp
+@@ -200,8 +200,37 @@ void StaticRecompCore::InitLookupTable(u32 ram_size, u32 exram_size)
+   }
+ }
+ 
++void StaticRecompCore::QueueCacheInvalidate(u32 address, u32 length)
++{
++  if (m_has_pending_cache_invalidate && address == m_pending_cache_end)
++  {
++    // Contiguous with the run so far (the common case: a compiled
++    // DCFlushRange/DCInvalidateRange loop calling this once per line at
++    // sequentially increasing addresses), so just extend it.
++    m_pending_cache_end += length;
++    return;
++  }
++  // Not contiguous (different address, different op, or first call this
++  // dispatch): resolve whatever was pending first, so invalidation order is
++  // preserved, then start a new pending run.
++  FlushPendingCacheInvalidate();
++  m_has_pending_cache_invalidate = true;
++  m_pending_cache_start = address;
++  m_pending_cache_end = address + length;
++}
++
++void StaticRecompCore::FlushPendingCacheInvalidate()
++{
++  if (!m_has_pending_cache_invalidate)
++    return;
++  m_has_pending_cache_invalidate = false;
++  OnICacheInvalidate(m_pending_cache_start, m_pending_cache_end - m_pending_cache_start);
++}
++
+ int StaticRecompCore::ChunkIndexOf(u32 address)
+ {
++  if (m_has_pending_cache_invalidate)
++    FlushPendingCacheInvalidate();
+   if (!m_module_active || m_chunk_lookup_table.empty())
+     return -1;
+ 
+diff --git a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h
+index 07e1385..1d0f0f6 100644
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h
+@@ -13,6 +13,7 @@ struct StaticRecompModuleSource
+   using HostCall = bool (*)(CPUState*, u32, void*);
+   using HostCallContains = bool (*)(u32, void*);
+   using HostCallRangeContains = bool (*)(u32, u32, void*);
++  using HostCallActive = bool (*)(void*);
+ 
+   enum class Kind
+   {
+@@ -43,5 +44,8 @@ struct StaticRecompModuleSource
+   HostCall host_call = nullptr;
+   HostCallContains host_call_contains = nullptr;
+   HostCallRangeContains host_call_range_contains = nullptr;
++  // Optional: false while no mod intercepts guest code, letting the core skip
++  // the host-call hook (and its per-dispatch lookups) altogether.
++  HostCallActive host_call_active = nullptr;
+   void* host_call_user = nullptr;
+ };
+diff --git a/module-template/module_export.c b/module-template/module_export.c
+index 04bce0b..ecc03fb 100644
+--- a/module-template/module_export.c
++++ b/module-template/module_export.c
+@@ -76,6 +76,13 @@ void dolrecomp_indirect_dispatch(CPUState* ctx, u32 address)
+     (void)selected_dispatch(ctx, address);
+ }
+ 
++// Target of DolRecomp's inline bctrl sites. Nonzero when the module ran code
++// at `address`; zero when it covers nothing there and executed nothing.
++int dolrecomp_indirect_call(CPUState* ctx, u32 address)
++{
++    return selected_dispatch(ctx, address);
++}
++
+ static int chassis_dispatch(CPUState* ctx, u32 address)
+ {
+     return selected_dispatch(ctx, address);
+@@ -118,3 +125,17 @@ RECOMP_MODULE_EXPORT const StaticRecompModuleDesc* staticrecomp_get_module(void)
+ {
+     return &s_desc;
+ }
++
++// Cross-chunk direct calls (DolRecomp's dolrecomp_call_enter sites) jump from
++// one chunk straight into another, skipping the chassis between them, and
++// with it the chassis's per-dispatch checks: mod host-call hooks, forced
++// fallback ranges, lockstep/trace, and SMC chunk verification. The chassis
++// turns them off here whenever any of those needs to see every transfer.
++// Parking the depth counter at its ceiling makes every dolrecomp_call_enter()
++// refuse, so each site takes its return-to-chassis path instead. Only called
++// between dispatches, when no direct call is in flight.
++extern unsigned dolrecomp_call_depth;
++RECOMP_MODULE_EXPORT void staticrecomp_set_direct_calls(int enabled)
++{
++    dolrecomp_call_depth = enabled ? 0u : 0xFFFFFFFFu;
++}

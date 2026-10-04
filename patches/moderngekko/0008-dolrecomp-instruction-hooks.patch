@@ -1,0 +1,75 @@
+diff --git a/src/backend/emitter.c b/src/backend/emitter.c
+index 7ad159a..c5a20d0 100644
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -4,6 +4,9 @@
+ #include "emitter.h"
+ #include "backend/c_cfg.h"
+ 
++#include <stdlib.h>
++#include <string.h>
++
+ static u32 cr_field_shift(u8 crf) {
+     return 4u * (7u - (u32)crf);
+ }
+@@ -341,6 +344,52 @@ void emit_set_entry_targets(const u32* targets, u32 count) {
+     g_entry_target_count = count ? count : 0;
+ }
+ 
++// RumbleRecomp: native instruction hooks. DOLRECOMP_HOOKS="802A52F4:my_hook,..." emits a call
++// to `void my_hook(CPUState* ctx)` immediately before the guest instruction at that address,
++// every time it executes, whether reached by fallthrough, a local branch, a direct
++// cross-chunk call or the chassis. The hook sees (and may change) the full guest register
++// state at that point; its definition lives in a module source added with
++// RECOMPCORE_MODULE_EXTRA_SOURCES. Parsed lazily; at most 64 hooks.
++typedef struct {
++    u32 address;
++    char name[64];
++} InstructionHook;
++static InstructionHook g_hooks[64];
++static int g_hook_count = -1;
++
++static void load_instruction_hooks(void) {
++    g_hook_count = 0;
++    const char* spec = getenv("DOLRECOMP_HOOKS");
++    while (spec && *spec && g_hook_count < 64) {
++        char* end = NULL;
++        unsigned long addr = strtoul(spec, &end, 16);
++        if (!end || *end != ':')
++            break;
++        const char* name = end + 1;
++        size_t len = strcspn(name, ",");
++        if (len == 0 || len >= sizeof(g_hooks[0].name))
++            break;
++        g_hooks[g_hook_count].address = (u32)addr;
++        memcpy(g_hooks[g_hook_count].name, name, len);
++        g_hooks[g_hook_count].name[len] = '\0';
++        g_hook_count++;
++        spec = name + len;
++        if (*spec == ',')
++            spec++;
++    }
++}
++
++static void emit_instruction_hook(FILE* out, u32 address) {
++    if (g_hook_count < 0)
++        load_instruction_hooks();
++    for (int h = 0; h < g_hook_count; h++) {
++        if (g_hooks[h].address == address) {
++            fprintf(out, "    { void %s(CPUState* ctx); %s(ctx); }\n", g_hooks[h].name,
++                    g_hooks[h].name);
++        }
++    }
++}
++
+ static bool address_is_branch_target(u32 addr) {
+     u32 lo = 0, hi = g_entry_target_count;
+     while (lo < hi) {
+@@ -2010,6 +2059,7 @@ bool emit_function(FILE* out, const PPCInst* insts, u32 count, u32 func_addr) {
+             fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+         if (cfg.leaders[i] && cfg.block_cycles[i] != 0)
+             fprintf(out, "    ctx->downcount -= %u;\n", cfg.block_cycles[i]);
++        emit_instruction_hook(out, insts[i].address);
+         emit_instruction_with_range(
+             out, &insts[i], func_addr, func_end,
+             c_function_cfg_can_loop_directly(&cfg, insts, func_addr, i),

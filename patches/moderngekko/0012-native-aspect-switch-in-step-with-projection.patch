@@ -1,0 +1,163 @@
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -3,6 +3,10 @@
+ 
+ #include "VideoCommon/Present.h"
+ 
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++
+ #include "Common/ChunkFile.h"
+ #include "Core/Config/GraphicsSettings.h"
+ #include "Core/Config/MainSettings.h"
+@@ -714,14 +718,35 @@
+   // RumbleRecomp: a scene flagged as native-aspect-only is drawn unwidened at the game's own
+   // aspect (pillarboxed; CalculateDrawAspectRatio honours the flag); Present() fills the sides
+   // with blurred panels.
+-  m_native_aspect_scene =
++  // The hack factors set below only reach the projection with the next frame, and the game
++  // may queue finished frames before they are shown, so the draw shape follows the frame being
++  // shown: each XFB copy carries whether it was rendered unwidened (bRRNativeAspect). Otherwise
++  // the first frame of the scene is a widened frame squeezed into 16:9, and the first frame
++  // after it an unwidened frame stretched to the window.
++  const bool want_native_aspect =
+       g_ActiveConfig.bWidescreenHack && g_rr_native_aspect_scene.load(std::memory_order_relaxed);
++  g_Config.bRRNativeAspect = want_native_aspect;
++  const bool was_native = m_native_aspect_scene;
++  m_native_aspect_scene =
++      g_ActiveConfig.bWidescreenHack && (m_xfb_entry ? m_xfb_entry->rr_native_aspect : want_native_aspect);
++  static const bool s_log_native = std::getenv("RR_LOG_NATIVE") != nullptr;
++  if (s_log_native && was_native != m_native_aspect_scene)
++  {
++    std::fprintf(stderr, "[native] %llu present shape=%d want=%d active_cfg=%d xfb=%llu\n",
++                 static_cast<unsigned long long>(
++                     std::chrono::duration_cast<std::chrono::milliseconds>(
++                         std::chrono::steady_clock::now().time_since_epoch())
++                         .count()),
++                 m_native_aspect_scene ? 1 : 0, want_native_aspect ? 1 : 0,
++                 g_ActiveConfig.bRRNativeAspect ? 1 : 0,
++                 static_cast<unsigned long long>(m_xfb_entry ? m_xfb_entry->id : 0));
++  }
+   const float draw_aspect_ratio = CalculateDrawAspectRatio();
+ 
+   // Update aspect ratio hack values
+   // Won't take effect until next frame
+   // Don't know if there is a better place for this code so there isn't a 1 frame delay
+-  if (g_ActiveConfig.bWidescreenHack && !m_native_aspect_scene)
++  if (g_ActiveConfig.bWidescreenHack && !want_native_aspect)
+   {
+     const auto& vi = Core::System::GetInstance().GetVideoInterface();
+     float source_aspect_ratio = vi.GetAspectRatio();
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -152,7 +152,6 @@
+   // Offsets imply black borders (if the window aspect ratio doesn't match the game's one).
+   MathUtil::Rectangle<int> m_target_rectangle = {};
+   mutable bool m_native_aspect_scene = false;
+-
+   u32 m_auto_resolution_scale = 1;
+ 
+   RcTcacheEntry m_xfb_entry;
+--- a/Source/Core/VideoCommon/TextureCacheBase.cpp
++++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
+@@ -1980,6 +1980,7 @@
+     return;
+ 
+   std::ranges::sort(candidates, {}, &TCacheEntry::id);
++  stitched_entry->rr_native_aspect = candidates.back()->rr_native_aspect;
+ 
+   // We only upscale when necessary to preserve resolution. i.e. when there are upscaled partial
+   // copies to be stitched together.
+@@ -3191,6 +3192,7 @@
+   is_efb_copy = false;
+   is_xfb_copy = true;
+   is_xfb_container = false;
++  rr_native_aspect = g_ActiveConfig.bRRNativeAspect;
+   memory_stride = stride;
+ 
+   ASSERT_MSG(VIDEO, memory_stride >= BytesPerRow(), "Memory stride is too small");
+--- a/Source/Core/VideoCommon/TextureCacheBase.h
++++ b/Source/Core/VideoCommon/TextureCacheBase.h
+@@ -137,6 +137,7 @@
+   bool should_force_safe_hashing = false;  // for XFB
+   bool is_xfb_copy = false;
+   bool is_xfb_container = false;
++  bool rr_native_aspect = false;  // RumbleRecomp: XFB rendered for a native-aspect scene
+   u64 id = 0;
+   u32 content_semaphore = 0;  // Counts up
+ 
+--- a/Source/Core/VideoCommon/VideoConfig.h
++++ b/Source/Core/VideoCommon/VideoConfig.h
+@@ -303,6 +303,9 @@
+   int iSafeTextureCache_ColorSamples = 0;
+   float fAspectRatioHackW = 1;  // Initial value needed for the first frame
+   float fAspectRatioHackH = 1;
++  // RumbleRecomp: this frame is rendered unwidened for a native-aspect scene (set alongside the
++  // hack factors; XFB copies carry it so the presenter shows each frame in its own shape).
++  bool bRRNativeAspect = false;
+   bool bEnablePixelLighting = false;
+   bool bFastDepthCalc = false;
+   bool bVertexRounding = false;
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore.h
+@@ -181,6 +181,7 @@
+   // (module_hooks/rumble_hud.c); drives g_rr_native_aspect_scene.
+   int (*m_poll_native_scene)() = nullptr;
+   u64 m_native_scene_last_ms = 0;
++  u64 m_native_scene_hold_until_ms = 0;  // longer hold after a scene is first detected
+   u64 m_non_entry_dispatches = 0;
+   u32 m_host_call_passthrough_pc = 0;
+   bool m_host_call_passthrough = false;
+--- a/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
++++ b/Source/Core/Core/PowerPC/StaticRecomp/StaticRecompCore_Run.cpp
+@@ -153,18 +153,39 @@
+       m_set_hud_anchor(dx, dy);
+     }
+     // Native-aspect scenes: the module reports each time such a layout is laid out; hold the
+-    // presenter's pillarbox for 150 ms after the last report so it does not flicker between
+-    // frames and releases shortly after the scene ends.
++    // presenter's pillarbox for 350 ms after the last report so it does not flicker between
++    // frames (switching from the results screen to the befriended screen leaves a ~220 ms gap)
++    // and releases shortly after the scene ends.
+     if (m_poll_native_scene)
+     {
+-      const u64 now_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+-                                              std::chrono::steady_clock::now().time_since_epoch())
+-                                              .count());
+-      if (m_poll_native_scene())
+-        m_native_scene_last_ms = now_ms;
+-      const bool active = g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
+-                          m_native_scene_last_ms != 0 && now_ms - m_native_scene_last_ms < 150;
+-      g_rr_native_aspect_scene.store(active, std::memory_order_relaxed);
++      // The results/ranking layouts are laid out once when the scene starts, then not again
++      // for ~250 ms while the room fades in: when a scene is first detected, hold for 500 ms
++      // so that gap does not flick the presenter back to wide for a couple of frames.
++      // The clock is only read while a scene is reported or active: this runs every timing
++      // slice, and reading it unconditionally cost ~8% of the CPU thread in busy gameplay.
++      const bool seen = m_poll_native_scene();
++      const bool was_active = g_rr_native_aspect_scene.load(std::memory_order_relaxed);
++      if (seen || was_active)
++      {
++        const u64 now_ms = static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
++                                                std::chrono::steady_clock::now().time_since_epoch())
++                                                .count());
++        if (seen)
++        {
++          if (!was_active)
++            m_native_scene_hold_until_ms = now_ms + 500;
++          m_native_scene_last_ms = now_ms;
++        }
++        const bool active = g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
++                            m_native_scene_last_ms != 0 &&
++                            (now_ms - m_native_scene_last_ms < 350 ||
++                             now_ms < m_native_scene_hold_until_ms);
++        static const bool s_log_native = std::getenv("RR_LOG_NATIVE") != nullptr;
++        if (s_log_native && active != was_active)
++          std::fprintf(stderr, "[native] %llu cpu active=%d\n", static_cast<unsigned long long>(now_ms),
++                       active ? 1 : 0);
++        g_rr_native_aspect_scene.store(active, std::memory_order_relaxed);
++      }
+     }
+     // Direct cross-chunk calls bypass every per-dispatch check below; allow
+     // them only while none of those checks has anything to catch.

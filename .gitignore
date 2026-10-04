@@ -1,0 +1,43 @@
+# Game data: never commit (copyrighted; users supply their own)
+/original/
+/extracted/
+/content/
+/saves/
+/input_patches/
+patches/out/
+*.wad
+*.iso
+*.wbfs
+*.sav
+*.profraw
+*.profdata
+
+# Build output, runtime user folders, benchmark states and dumps
+/build/
+/runtime/
+
+# Upstream clones, pinned in third_party.lock.md; our changes live in patches/
+/third_party/
+/reference/
+
+# Downloaded third-party tools
+tools/dl/
+tools/flips/
+tools/xdelta3/
+tools/dtk.exe
+
+# Python caches
+__pycache__/
+*.pyc
+
+# launcher exe (tools\build_launcher_exe.ps1)
+/RumbleRecomp.exe
+
+# first-run setup output: the player's own game files (tools/rr_setup.py)
+/data/
+# compile kit assembled by tools/make_kit.py (ships with releases)
+/kit/
+# release packages (tools/make_release.py)
+/dist/
+# AI upscaler (Real-ESRGAN, downloaded into tools/realesrgan; ships with releases)
+/tools/realesrgan/

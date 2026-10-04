@@ -1,0 +1,51 @@
+name: Bug report
+description: Something doesn't work, looks wrong, or crashes.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing RumbleRecomp! Please don't attach game files or link to them.
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game version
+      options:
+        - Vanilla
+        - Weekend Edition 1.5
+        - Weekend Edition 1.5 + PATCH1
+        - The launcher, before playing
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: RumbleRecomp version
+      description: Shown next to the name at the top of the launcher.
+      placeholder: Beta 0.7
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you expected, what happened instead, and how to make it happen again.
+    validations:
+      required: true
+  - type: input
+    id: pc
+    attributes:
+      label: Your PC
+      description: Windows version and graphics card.
+      placeholder: Windows 11, NVIDIA RTX 3070
+  - type: input
+    id: controller
+    attributes:
+      label: Controller
+      description: Which controller, or keyboard only.
+      placeholder: PlayStation 4 controller over USB
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file
+      description: Drag in `data\play.log` from the RumbleRecomp folder. It records your last session.

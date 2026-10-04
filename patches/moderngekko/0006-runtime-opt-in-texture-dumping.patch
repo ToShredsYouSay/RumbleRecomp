@@ -1,0 +1,16 @@
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -681,6 +681,13 @@
+   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
+                   ShaderCompilationMode::AsynchronousUberShaders);
+   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, true);
++  // RumbleRecomp: UICommon::Init forces GFX_DUMP_TEXTURES off on every start, so a
++  // GFX.ini setting can never enable it. MODERNGEKKO_DUMP_TEXTURES=1 turns texture
++  // dumping on for this session only (current layer, never saved), the first step
++  // of making a texture pack: dumped PNGs land in <user-dir>/Dump/Textures/<game id>/,
++  // edited copies go in <user-dir>/Load/Textures/<game id>/ with HiresTextures on.
++  if (const char *dump = std::getenv("MODERNGEKKO_DUMP_TEXTURES"); dump && dump[0] == '1')
++    Config::SetCurrent(Config::GFX_DUMP_TEXTURES, true);
+   const std::vector<std::string> audio_backends =
+       AudioCommon::GetSoundBackends();
+   if (impl->config.headless) {
