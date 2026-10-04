@@ -80,6 +80,18 @@ session.
 
 See [docs/BUILDING.md](docs/BUILDING.md).
 
+## How this was made
+
+RumbleRecomp was built with a lot of help from an AI coding assistant, Claude by Anthropic. I started the project
+and directed it. I set its ground rules (players use their own copy, no game files are shared, and it builds with
+clang), made the design decisions, and tested every change by playing the game, including on real controllers and
+with fresh installs on two PCs. Claude wrote most of the code, patches, and scripts from that direction, and many
+of the fixes started with problems I found while playing.
+
+I'm saying this upfront because it matters to a lot of people in this community. Every change to Dolphin,
+ModernGekko, and DolRecomp is documented as a patch, the build guide lets anyone rebuild it from source, and bug
+reports are very welcome.
+
 ## Credits
 
 RumbleRecomp stands on the work of others:
