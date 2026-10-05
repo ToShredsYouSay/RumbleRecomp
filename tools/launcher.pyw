@@ -88,8 +88,10 @@ def game_files(game):
         wad, root = g['dev_wad'], os.path.join(BUILD, 'gameroot', g['root'])
     if not (os.path.exists(wad) and os.path.exists(root)):
         return None
-    module = next((m for m in (rr_compile.module_path(g['build'], DATA), os.path.join(BUILD, 'bin', g['module']))
-                   if os.path.isfile(m)), None)
+    # A player's module counts only if it was built from the current kit; the developer layout has no kit stamp.
+    dev = os.path.join(BUILD, 'bin', g['module'])
+    module = (rr_compile.module_path(g['build'], DATA) if rr_compile.module_current(g['build'], DATA)
+              else dev if os.path.isfile(dev) else None)
     return wad, root, module
 
 
@@ -850,7 +852,10 @@ def main():
             # set up but not built yet: offer to build every version that needs it
             todo = sorted({GAMES[n]['build'] for n in GAMES if game_files(n) and not game_files(n)[2]},
                           key=['vanilla', 'weekend'].index)
+            updated = os.path.isfile(rr_compile.module_path(GAMES[game.get()]['build'], DATA))
             if messagebox.askyesno('RumbleRecomp', (
+                    f'RumbleRecomp has been updated, so {game.get()} needs rebuilding for your PC. It takes about '
+                    f'20-40 minutes per version ({len(todo)} to build). Build now?' if updated else
                     f'{game.get()} needs to be built for your PC first. This happens once and takes about '
                     f'20-40 minutes per version ({len(todo)} to build). Build now?')):
                 open_build(root, todo, refresh_games)

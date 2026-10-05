@@ -33,6 +33,26 @@ def module_path(profile, data_dir=None):
     return os.path.join(data_dir or rr_setup.default_data_dir(), 'modules', MODULES[profile][1])
 
 
+def kit_stamp(profile):
+    """Fingerprint of the kit parts that shape a module: converter, hooks, native code, and speed profile."""
+    h = hashlib.sha1()
+    files = [os.path.join(KIT, 'bin', 'dolrecomp.exe'), os.path.join(KIT, 'pgo', MODULES[profile][2])]
+    files += sorted(glob.glob(os.path.join(KIT, 'src', 'module_hooks', '*')))
+    for f in files:
+        h.update(file_sha1(f).encode() if os.path.isfile(f) else b'-')
+    return h.hexdigest()
+
+
+def module_current(profile, data_dir=None):
+    """True if the module exists and was built from this kit (an update that changes the kit needs a rebuild)."""
+    path = module_path(profile, data_dir)
+    try:
+        with open(path + '.kit', encoding='utf-8') as f:
+            return os.path.isfile(path) and f.read().strip() == kit_stamp(profile)
+    except OSError:
+        return False
+
+
 def find_clang():
     bundled = os.path.join(KIT, 'toolchain', 'bin', 'clang.exe')
     if os.path.isfile(bundled):
@@ -176,6 +196,9 @@ def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, te
         log.close()
         raise CompileError('Linking failed. See ' + log.name)
     os.replace(tmp_out, out)
+    if not instrument:
+        with open(out + '.kit', 'w', encoding='utf-8') as f:
+            f.write(kit_stamp(profile))
     log.write(f'built {out} in {time.time() - t0:.0f} s\n')
     log.close()
     if not keep:
