@@ -17,6 +17,7 @@ switch ($Step) {
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0006-*.patch
     #   git -C third_party\ModernGekko\vendor\dolphin apply ..\..\..\..\patches\moderngekko\0007-*.patch
     #   git -C third_party\ModernGekko\vendor\dolphin\DolRecomp apply ..\..\..\..\..\patches\moderngekko\0008-*.patch
+    #   git -C third_party\ModernGekko\vendor\dolphin\DolRecomp apply ..\..\..\..\..\patches\moderngekko\0020-*.patch
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0009-*.patch
     #   git -C third_party\ModernGekko\vendor\dolphin apply ..\..\..\..\patches\moderngekko\0010-*.patch
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0011-*.patch
@@ -32,6 +33,8 @@ switch ($Step) {
     # 0015: Classic Controller fields for automation. 0016: player 1 is also GameCube pad port 1.
     # 0017/0018: the in-game menu (HOME or Esc: save and load states, fullscreen, and quit).
     # 0019: the game program's icon is rebuilt when tools\launcher.ico changes.
+    # 0020: replacement hooks ("ADDR:=function"), used for the native matrix routines in
+    # src\module_hooks\rumble_mtx.c (crowded fights such as a randomized Battle Royale).
     # 0013/0014: game window icon (configure with -DMODERNGEKKO_RUN_ICON=<repo>\tools\launcher.ico),
     # MODERNGEKKO_NO_MENU=1 hides the menu bar, no sunken client edge (thin frame around the picture).
     # 0011: RR_PRESS_TO_JOIN=1 (press a controller button to become the next player) and

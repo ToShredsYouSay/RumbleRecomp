@@ -10,6 +10,8 @@ Two ways to use it:
            [--wad <wad>] [--scenes ...] [--seconds N]
      writes <profile-dir>/raw/*.profraw; then `llvm-profdata merge -o merged.profdata raw/*.profraw`
      and build the module with -fprofile-use (tools/rr_compile.py shows how).
+     Build the instrumented module with `tools/rr_compile.py <profile> --instrument` so the profile's
+     function names match players' builds (tools/kit_pgo.sh does the whole round for both versions).
 Savestate names are relative to build/states. Launched runs use the save-data copy build/userdir_auto."""
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

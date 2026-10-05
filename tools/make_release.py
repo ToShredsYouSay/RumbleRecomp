@@ -26,7 +26,8 @@ GAME_EXTS = {'.wad', '.dol', '.app', '.iso', '.wbfs', '.rvz', '.gcm', '.ciso', '
 ALLOWED_BIN = {'codehandler.bin'}  # Dolphin Sys file (Gecko code handler, part of Dolphin)
 OUR_SOURCES = ['LICENSE', 'third_party.lock.md', 'tools/launcher.pyw', 'tools/rr_setup.py', 'tools/rr_compile.py',
                'tools/make_kit.py', 'tools/make_release.py', 'tools/build_launcher_exe.ps1',
-               'tools/make_launcher_icon.py', 'tools/make_launcher_art.py', 'src/module_hooks/rumble_hud.c', 'src/module_hooks/hooks.txt']
+               'tools/make_launcher_icon.py', 'tools/make_launcher_art.py', 'src/module_hooks/rumble_hud.c',
+               'src/module_hooks/rumble_mtx.c', 'src/module_hooks/hooks.txt']
 
 
 def version():
@@ -104,7 +105,7 @@ code from RecompCore's GXRuntime (kit\\src, included as source).
 Apply order (git apply, from the repository named):
   ModernGekko:              0001 0005 0006 0009 0011 0013 0015 0016 0018 0019
   vendor/dolphin:           0002 0004 0007 0010 0012 0014 0017
-  vendor/dolphin/DolRecomp: 0003 0008
+  vendor/dolphin/DolRecomp: 0003 0008 0020
 """
 
 THIRD_PARTY = """Bundled third-party components

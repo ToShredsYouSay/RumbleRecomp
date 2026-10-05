@@ -4,8 +4,9 @@ using the compile kit (tools/make_kit.py). Same recipe as the developer build: D
 instruction hooks, every C file compiled in parallel with the speed-tuning profile, ThinLTO link.
 
 Library (used by the launcher) and CLI:
-  python tools/rr_compile.py vanilla|weekend [--data <dir>] [--jobs N] [--clean]
-Result: <data>/modules/<module>.dll. Intermediate files (<data>/build/<profile>) are kept so that rebuilds
+  python tools/rr_compile.py vanilla|weekend [--data <dir>] [--jobs N] [--clean] [--instrument]
+Result: <data>/modules/<module>.dll. --instrument builds the profile-recording module instead (developer use,
+see tools/rr_pgo_train.py), into <data>/build/<profile>_instrumented. Intermediate files (<data>/build/<profile>) are kept so that rebuilds
 after an update only recompile what changed (--clean removes them afterwards)."""
 import concurrent.futures, glob, hashlib, json, os, runpy, shutil, subprocess, sys, time
 
@@ -47,23 +48,28 @@ def hooks():
         return ','.join(l.strip() for l in f if l.strip() and not l.startswith('#'))
 
 
-def run(cmd, env=None, log=None):
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True, creationflags=NO_WINDOW)
+def run(cmd, env=None, log=None, cwd=None):
+    r = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True, creationflags=NO_WINDOW)
     if log:
         log.write(' '.join(cmd) + '\n' + r.stdout + r.stderr + '\n')
     return r
 
 
-def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, text: print(f'{frac:5.1%} {text}')):
+def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, text: print(f'{frac:5.1%} {text}'),
+          instrument=False):
     """Build one module. progress(fraction 0..1, text). Raises CompileError."""
     data_dir = data_dir or rr_setup.default_data_dir()
     root_name, dll_name, prof_name = MODULES[profile]
     dol = os.path.join(data_dir, 'gameroot', root_name, 'sys', 'main.dol')
     if not os.path.isfile(dol):
         raise CompileError(f'{profile}: game files are not set up yet (use "Game files..." first).')
-    clang = find_clang()
+    # The kit's trimmed toolchain has no profile-recording runtime; instrumenting is developer-only and uses
+    # the full llvm-mingw clang on PATH (the same version).
+    clang = (shutil.which('clang') if instrument else None) or find_clang()
     prof = os.path.join(KIT, 'pgo', prof_name)
-    work = os.path.join(data_dir, 'build', profile)
+    pgo = (['-fprofile-generate'] if instrument else
+           ['-fprofile-use=' + prof, '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date'])
+    work = os.path.join(data_dir, 'build', profile + ('_instrumented' if instrument else ''))
     gen, obj = os.path.join(work, 'gen'), os.path.join(work, 'obj')
     os.makedirs(obj, exist_ok=True)
     jobs = jobs or os.cpu_count() or 4
@@ -103,14 +109,13 @@ def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, te
     src = os.path.join(KIT, 'src')
     sources = [os.path.join(src, 'module-template', 'module_export.c')]
     sources += [os.path.join(src, 'GXRuntime', 'src', 'core', s) for s in CORE_SOURCES]
-    sources += [os.path.join(src, 'module_hooks', 'rumble_hud.c')]
+    sources += [os.path.join(src, 'module_hooks', f) for f in ('rumble_hud.c', 'rumble_mtx.c')]
     chunks = os.path.join(generated, 'chunks')
     sources += sorted(os.path.join(chunks, f) for f in os.listdir(chunks) if f.endswith('.c'))
     flags = ['-DDOLRECOMP_CPU_HEADER="core/cpu.h"', '-DMODULE_GAME_ID="WPSE01"', '-DgWPSE01_recomp_EXPORTS',
              '-I' + generated, '-I' + os.path.join(src, 'GXRuntime', 'include'),
              '-I' + os.path.join(src, 'StaticRecomp'), '-I' + obj,
-             '-fprofile-use=' + prof, '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date',
-             '-O3', '-DNDEBUG', '-std=gnu11', '-flto=thin', '-fvisibility=hidden', '-O2', '-ffp-contract=off',
+             *pgo, '-O3', '-DNDEBUG', '-std=gnu11', '-flto=thin', '-fvisibility=hidden', '-O2', '-ffp-contract=off',
              '-fno-fast-math']
     objects = [os.path.join(obj, os.path.basename(s) + '.o') for s in sources]
     # Anything every file depends on: settings, compiler, profile and all headers (any change -> rebuild all).
@@ -132,8 +137,11 @@ def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, te
             if not os.path.isfile(o) or manifest.get(os.path.basename(o)) != keys[o]]
     log.write(f'{len(todo)} of {len(sources)} files to compile\n')
 
+    # Each file is compiled from its own folder by bare name: the speed-tuning profile names some functions
+    # after the file they came from, so the names must not depend on where the game is installed.
     def compile_one(i):
-        return i, run([clang] + flags + ['-c', sources[i], '-o', objects[i]])
+        return i, run([clang] + flags + ['-c', os.path.basename(sources[i]), '-o', objects[i]],
+                      cwd=os.path.dirname(sources[i]))
 
     done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
@@ -155,14 +163,13 @@ def build(profile, data_dir=None, jobs=None, keep=True, progress=lambda frac, te
 
     # 4. link (ThinLTO: the final whole-game optimisation; its cache skips unchanged parts on rebuilds)
     progress(0.80, 'Linking (final optimisation, this takes a few minutes)...')
-    out = module_path(profile, data_dir)
+    out = os.path.join(work, dll_name) if instrument else module_path(profile, data_dir)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     rsp = os.path.join(work, 'link.rsp')
     with open(rsp, 'w', encoding='utf-8') as f:
         f.write('\n'.join('"' + o.replace('\\', '/') + '"' for o in objects))
     tmp_out = out + '.tmp'
-    r = run([clang, '-fprofile-use=' + prof, '-Wno-profile-instr-unprofiled', '-Wno-profile-instr-out-of-date',
-             '-O3', '-DNDEBUG', '-flto=thin', '-shared', '-o', tmp_out,
+    r = run([clang, *pgo, '-O3', '-DNDEBUG', '-flto=thin', '-shared', '-o', tmp_out,
              '-Wl,--thinlto-cache-dir=' + os.path.join(work, 'lto_cache').replace('\\', '/'),
              '-Wl,--major-image-version,0,--minor-image-version,0', '@' + rsp], log=log)
     if r.returncode != 0 or not os.path.isfile(tmp_out):
@@ -218,7 +225,8 @@ def main(argv):
         return 2
     opt = lambda k: argv[argv.index(k) + 1] if k in argv else None
     try:
-        print(build(argv[0], opt('--data'), int(opt('--jobs')) if opt('--jobs') else None, '--clean' not in argv))
+        print(build(argv[0], opt('--data'), int(opt('--jobs')) if opt('--jobs') else None, '--clean' not in argv,
+                    instrument='--instrument' in argv))
     except CompileError as e:
         print('BUILD FAILED:', e)
         return 1

@@ -11,3 +11,15 @@
 802A51C8:rr_hook_lyt_pane_enter
 802A7648:rr_hook_picture_draw
 802A764C:rr_hook_picture_drawn
+# Native matrix routines (rumble_mtx.c). "ADDR:=function" replaces the guest function when the
+# native one returns nonzero; the plain hooks on each return check results under RR_NATIVE_VERIFY=1.
+802C8A80:=rr_native_mtx_identity
+802C8AA8:rr_verify_mtx_identity
+802C8AB0:=rr_native_mtx_copy
+802C8AE0:rr_verify_mtx_copy
+802C8AF0:=rr_native_mtx_concat
+802C8BB8:rr_verify_mtx_concat
+802C8BC0:=rr_native_mtx_concat_array
+802C8D44:rr_verify_mtx_concat_array
+802C9590:=rr_native_mtx_mult_vec
+802C95E0:rr_verify_mtx_mult_vec

@@ -118,7 +118,7 @@ def main():
     print('\nBy module:')
     for m, c in per_mod.most_common(): print(f'  {100*c/n:5.1f}%  {m}')
     print('\nTop symbols:')
-    for (m, s), c in per_sym.most_common(30): print(f'  {100*c/n:5.1f}%  [{m}] {s[:150]}')
+    for (m, s), c in per_sym.most_common(int(os.environ.get('RR_PROF_TOP', 30))): print(f'  {100*c/n:5.1f}%  [{m}] {s[:150]}')
 
 
 if __name__ == '__main__':

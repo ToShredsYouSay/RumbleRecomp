@@ -6,7 +6,7 @@
   kit/src/module-template/                 module_export.c, gen_module_tables.py
   kit/src/GXRuntime/{include,src/core}/    CPU support code compiled into each module
   kit/src/StaticRecomp/StaticRecompABI.h   module <-> runtime interface
-  kit/src/module_hooks/                    rumble_hud.c + hooks.txt
+  kit/src/module_hooks/                    rumble_hud.c, rumble_mtx.c, and hooks.txt
   kit/pgo/{vanilla,weekend}.profdata       speed-tuning profiles (execution counts, no game code)
   kit/toolchain/                           clang/lld (llvm-mingw), only with --toolchain
 
@@ -17,8 +17,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOLPHIN = os.path.join(ROOT, 'third_party', 'ModernGekko', 'vendor', 'dolphin')
 # The speed-tuning profiles and the llvm-mingw folder: set RR_PGO_VANILLA, RR_PGO_WEEKEND, and RR_TOOLCHAIN to
 # use your own (the defaults are the developer's). Release zips carry the profiles in kit/pgo.
-PROFILES = {'vanilla': os.environ.get('RR_PGO_VANILLA', r'C:\mgpgo\prof3\merged.profdata'),
-            'weekend': os.environ.get('RR_PGO_WEEKEND', r'C:\mgpgo\wk_prof\merged.profdata')}
+PROFILES = {'vanilla': os.environ.get('RR_PGO_VANILLA', r'C:\mgpgo\kv_prof\merged.profdata'),
+            'weekend': os.environ.get('RR_PGO_WEEKEND', r'C:\mgpgo\k_prof\merged.profdata')}
 TOOLCHAIN = os.environ.get('RR_TOOLCHAIN') or os.path.join(os.path.expanduser('~'), '.local', 'share', 'retcomm',
                                                             'toolchains', 'cmake-clang-v1',
                          'latest')
@@ -40,7 +40,7 @@ def main(argv):
         copy(f, os.path.join(out, 'src', 'GXRuntime', 'src', 'core', os.path.basename(f)))
     copy(os.path.join(DOLPHIN, 'Source', 'Core', 'Core', 'PowerPC', 'StaticRecomp', 'StaticRecompABI.h'),
          os.path.join(out, 'src', 'StaticRecomp', 'StaticRecompABI.h'))
-    for f in ('rumble_hud.c', 'hooks.txt'):
+    for f in ('rumble_hud.c', 'rumble_mtx.c', 'hooks.txt'):
         copy(os.path.join(ROOT, 'src', 'module_hooks', f), os.path.join(out, 'src', 'module_hooks', f))
     for name, path in PROFILES.items():
         copy(path, os.path.join(out, 'pgo', f'{name}.profdata'))

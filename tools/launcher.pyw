@@ -52,7 +52,7 @@ def load_ui_font():
 
 
 UI_FONT = load_ui_font()
-VERSION = '0.7'
+VERSION = '0.7.1'
 DATA = rr_setup.default_data_dir()
 WEEKEND_URL = 'https://projectpokemon.org/home/files/file/4256-pokemon-rumble-weekend-edition/'
 PATCH1_URL = 'https://projectpokemon.org/home/files/file/5855-unofficial-weekend-edition-v150patch1/'

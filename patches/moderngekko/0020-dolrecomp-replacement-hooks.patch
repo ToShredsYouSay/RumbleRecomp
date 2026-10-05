@@ -1,0 +1,70 @@
+--- a/src/backend/emitter.c
++++ b/src/backend/emitter.c
+@@ -350,8 +350,13 @@
+ // cross-chunk call or the chassis. The hook sees (and may change) the full guest register
+ // state at that point; its definition lives in a module source added with
+ // RECOMPCORE_MODULE_EXTRA_SOURCES. Parsed lazily; at most 64 hooks.
++// "ADDR:=my_func" at a function's first instruction is a replacement instead: `int
++// my_func(CPUState* ctx)` runs first, and when it returns nonzero it has done the whole
++// function natively, so the guest code is skipped and control returns to LR as a blr would.
++// When it returns 0 the guest code runs as normal.
+ typedef struct {
+     u32 address;
++    bool replace;
+     char name[64];
+ } InstructionHook;
+ static InstructionHook g_hooks[64];
+@@ -366,10 +371,14 @@
+         if (!end || *end != ':')
+             break;
+         const char* name = end + 1;
++        bool replace = *name == '=';
++        if (replace)
++            name++;
+         size_t len = strcspn(name, ",");
+         if (len == 0 || len >= sizeof(g_hooks[0].name))
+             break;
+         g_hooks[g_hook_count].address = (u32)addr;
++        g_hooks[g_hook_count].replace = replace;
+         memcpy(g_hooks[g_hook_count].name, name, len);
+         g_hooks[g_hook_count].name[len] = '\0';
+         g_hook_count++;
+@@ -379,14 +388,26 @@
+     }
+ }
+ 
+-static void emit_instruction_hook(FILE* out, u32 address) {
++static void emit_instruction_hook(FILE* out, u32 address, bool route_local_returns,
++                                  u32 function_address) {
+     if (g_hook_count < 0)
+         load_instruction_hooks();
+     for (int h = 0; h < g_hook_count; h++) {
+-        if (g_hooks[h].address == address) {
++        if (g_hooks[h].address != address)
++            continue;
++        if (!g_hooks[h].replace) {
+             fprintf(out, "    { void %s(CPUState* ctx); %s(ctx); }\n", g_hooks[h].name,
+                     g_hooks[h].name);
+-        }
++            continue;
++        }
++        fprintf(out, "    { int %s(CPUState* ctx); if (%s(ctx)) {\n", g_hooks[h].name,
++                g_hooks[h].name);
++        fprintf(out, "        ctx->pc = ctx->lr & ~3u;\n");
++        if (route_local_returns)
++            fprintf(out, "        goto return_dispatch_%08X;\n", function_address);
++        else
++            fprintf(out, "        return;\n");
++        fprintf(out, "    } }\n");
+     }
+ }
+ 
+@@ -2059,7 +2080,7 @@
+             fprintf(out, "    ctx->pc = 0x%08Xu;\n", insts[i].address);
+         if (cfg.leaders[i] && cfg.block_cycles[i] != 0)
+             fprintf(out, "    ctx->downcount -= %u;\n", cfg.block_cycles[i]);
+-        emit_instruction_hook(out, insts[i].address);
++        emit_instruction_hook(out, insts[i].address, has_local_returns, func_addr);
+         emit_instruction_with_range(
+             out, &insts[i], func_addr, func_end,
+             c_function_cfg_can_loop_directly(&cfg, insts, func_addr, i),
