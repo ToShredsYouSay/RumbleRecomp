@@ -1,0 +1,51 @@
+@title Main set
+@default on
+
+# One achievement per line, fields separated by tabs: id, title, description, condition.
+# Conditions and icons are documented in third_party/ModernGekko/src/runtime/rumble_achievements.hpp.
+#
+# "count" and "flag" read the game's progress table: A 0 is the Normal tier, B looks like the number of players
+# (1 for solo play), C 7 is the Battle Royale, and D is its rank (1 is C, 2 is B, 3 is A). The game opens a rank
+# when you win the one before it, so a rank counts as cleared when the next rank's entry is open (flag mask 1).
+# The count in each entry goes up when a battle starts, not when it is cleared.
+#
+# Areas: B is the rank (1 is C, 2 is B, 3 is A, 4 is S), C is the area in the game's order (1 Silent Forest to 6
+# Eternal Tower), D is the floor. Rank C has five floors and Rank B six, the last one being the boss. The game keeps no
+# record of a boss being beaten, so Rank C and B unlock when the boss floor has been entered. Rank A and S unlock on
+# entering the first floor of that rank (their floor counts have not been seen in a save yet).
+#
+# Not seen in any save yet, so these follow the pattern (winning a rank opens the next entry) and are unproven: the
+# Rank S Royale (D5, or the Another tier opening, A1) and the Another tier (A 1: its Rank C to S royales, and EX
+# opening as A 2) .
+royale_c	Rank C Royale	Clear the Normal Rank C Battle Royale	flag 0 1 7 2 1	crown:C
+royale_b	Rank B Royale	Clear the Normal Rank B Battle Royale	flag 0 1 7 3 1	crown:B
+royale_a	Rank A Royale	Clear the Normal Rank A Battle Royale	flag 0 1 7 4 1	crown:A
+royale_s	Rank S Royale	Clear the Normal Rank S Battle Royale	flag 0 1 7 5 1 | flag 1 1 7 1 1	crown:S
+forest_c	Silent Forest Rank C	Reach the boss at the top of Silent Forest, Rank C	count 0 1 1 5	rank:C
+prairie_c	Windy Prairie Rank C	Reach the boss at the top of Windy Prairie, Rank C	count 0 1 2 5	rank:C
+cave_c	Rocky Cave Rank C	Reach the boss at the top of Rocky Cave, Rank C	count 0 1 3 5	rank:C
+furnace_c	Fiery Furnace Rank C	Reach the boss at the top of Fiery Furnace, Rank C	count 0 1 4 5	rank:C
+beach_c	Bright Beach Rank C	Reach the boss at the top of Bright Beach, Rank C	count 0 1 5 5	rank:C
+tower_c	Eternal Tower Rank C	Reach the boss at the top of Eternal Tower, Rank C	count 0 1 6 5	rank:C
+forest_b	Silent Forest Rank B	Reach the boss at the top of Silent Forest, Rank B	count 0 2 1 6	rank:B
+prairie_b	Windy Prairie Rank B	Reach the boss at the top of Windy Prairie, Rank B	count 0 2 2 6	rank:B
+cave_b	Rocky Cave Rank B	Reach the boss at the top of Rocky Cave, Rank B	count 0 2 3 6	rank:B
+furnace_b	Fiery Furnace Rank B	Reach the boss at the top of Fiery Furnace, Rank B	count 0 2 4 6	rank:B
+beach_b	Bright Beach Rank B	Reach the boss at the top of Bright Beach, Rank B	count 0 2 5 6	rank:B
+tower_b	Eternal Tower Rank B	Reach the boss at the top of Eternal Tower, Rank B	count 0 2 6 6	rank:B
+another_royale_c	Another Rank C Royale	Clear the Another Rank C Battle Royale	flag 1 1 7 2 1	crown:C
+another_royale_b	Another Rank B Royale	Clear the Another Rank B Battle Royale	flag 1 1 7 3 1	crown:B
+another_royale_a	Another Rank A Royale	Clear the Another Rank A Battle Royale	flag 1 1 7 4 1	crown:A
+another_royale_s	Another Rank S Royale	Clear the Another Rank S Battle Royale	flag 1 1 7 5 1 | flag 2 1 7 1 1	crown:S
+forest_a	Silent Forest Rank A	Step up to Rank A in Silent Forest	count 0 3 1 1	rank:A
+prairie_a	Windy Prairie Rank A	Step up to Rank A in Windy Prairie	count 0 3 2 1	rank:A
+cave_a	Rocky Cave Rank A	Step up to Rank A in Rocky Cave	count 0 3 3 1	rank:A
+furnace_a	Fiery Furnace Rank A	Step up to Rank A in Fiery Furnace	count 0 3 4 1	rank:A
+beach_a	Bright Beach Rank A	Step up to Rank A in Bright Beach	count 0 3 5 1	rank:A
+tower_a	Eternal Tower Rank A	Step up to Rank A in Eternal Tower	count 0 3 6 1	rank:A
+forest_s	Silent Forest Rank S	Step up to Rank S in Silent Forest	count 0 4 1 1	rank:S
+prairie_s	Windy Prairie Rank S	Step up to Rank S in Windy Prairie	count 0 4 2 1	rank:S
+cave_s	Rocky Cave Rank S	Step up to Rank S in Rocky Cave	count 0 4 3 1	rank:S
+furnace_s	Fiery Furnace Rank S	Step up to Rank S in Fiery Furnace	count 0 4 4 1	rank:S
+beach_s	Bright Beach Rank S	Step up to Rank S in Bright Beach	count 0 4 5 1	rank:S
+tower_s	Eternal Tower Rank S	Step up to Rank S in Eternal Tower	count 0 4 6 1	rank:S

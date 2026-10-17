@@ -28,13 +28,20 @@ switch ($Step) {
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0015-*.patch
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0016-*.patch
     #   git -C third_party\ModernGekko\vendor\dolphin apply ..\..\..\..\patches\moderngekko\0017-*.patch
+    #   git -C third_party\ModernGekko\vendor\dolphin apply ..\..\..\..\patches\moderngekko\0022-*.patch
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0018-*.patch
     #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0019-*.patch
+    #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0021-*.patch
+    #   git -C third_party\ModernGekko apply ..\..\patches\moderngekko\0023-*.patch
     # 0015: Classic Controller fields for automation. 0016: player 1 is also GameCube pad port 1.
     # 0017/0018: the in-game menu (HOME or Esc: save and load states, fullscreen, and quit).
     # 0019: the game program's icon is rebuilt when tools\launcher.ico changes.
     # 0020: replacement hooks ("ADDR:=function"), used for the native matrix routines in
     # src\module_hooks\rumble_mtx.c (crowded fights such as a randomized Battle Royale).
+    # 0021: achievements (our own, offline): pop-ups and a menu page, conditions on game memory,
+    # lists in tools\achievements.
+    # 0022/0023: the game window tracks focus, so keys and controllers are ignored while another window is
+    # in front; runs driven by automation (tests) ignore focus loss.
     # 0013/0014: game window icon (configure with -DMODERNGEKKO_RUN_ICON=<repo>\tools\launcher.ico),
     # MODERNGEKKO_NO_MENU=1 hides the menu bar, no sunken client edge (thin frame around the picture).
     # 0011: RR_PRESS_TO_JOIN=1 (press a controller button to become the next player) and

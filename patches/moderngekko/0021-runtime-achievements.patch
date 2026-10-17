@@ -1,0 +1,1292 @@
+--- a/src/runtime/rumble_menu.cpp
++++ b/src/runtime/rumble_menu.cpp
+@@ -7,6 +7,8 @@
+ // second (AsyncRequests events still run while paused).
+ 
+ #include "rumble_menu.hpp"
++
++#include "rumble_achievements.hpp"
+ 
+ #include "Common/FileUtil.h"
+ #include "Core/Core.h"
+@@ -53,6 +55,8 @@
+ using Clock = std::chrono::steady_clock;
+ 
+ constexpr int SLOTS = 4;
++constexpr int ACH_ROWS = 6;  // achievements visible at once on their page
++constexpr float HOLD_SECONDS = 5.0f;  // how long the confirm button is held to reset the achievements
+ constexpr u32 THUMB_WIDTH = 480;
+ 
+ enum class Page
+@@ -60,12 +64,17 @@
+   Main,
+   Save,
+   Load,
++  Achievements,
++  AchOptions,  // sets on and off, pop-ups, reset
++  ResetAsk,    // "Are you sure?", answered No by default
++  ResetHold,   // hold the confirm button to erase
+ };
+ enum MainItem
+ {
+   ITEM_RESUME,
+   ITEM_SAVE,
+   ITEM_LOAD,
++  ITEM_ACHIEVEMENTS,
+   ITEM_FULLSCREEN,
+   ITEM_QUIT,
+   ITEM_COUNT,
+@@ -94,6 +103,13 @@
+   Page page = Page::Main;
+   int item = ITEM_RESUME;
+   int slot = 0;
++  int scroll = 0;  // first achievement shown on the achievements page
++  int option = 0;  // selected row of the achievement options page
++  bool ask_yes = false;
++  bool hold_armed = false;  // the confirm button was let go since the hold page opened
++  bool holding = false;
++  Clock::time_point hold_start;
++  float hold = 0.0f;  // 0 to 1: how far the hold has got
+   std::array<Slot, SLOTS> slots;
+   Image frame;  // the game frame when the menu opened: the thumbnail for a new save
+   std::string toast;
+@@ -106,6 +122,7 @@
+ Platform* s_platform = nullptr;
+ std::jthread s_thread;
+ std::atomic<bool> s_redraw_pending = false;
++Clock::time_point s_forced_hold_until;  // set by the automation key "hold", for tests
+ std::mutex s_keys_mutex;
+ std::deque<int> s_keys;  // virtual-key codes from the game window
+ ImFont* s_font = nullptr;
+@@ -411,8 +428,8 @@
+ 
+ void DrawMain(ImDrawList* dl, ImVec2 ds, float u)
+ {
+-  static const char* const labels[ITEM_COUNT] = {"Resume", "Save state", "Load state",
+-                                                 "Fullscreen", "Quit game"};
++  static const char* const labels[ITEM_COUNT] = {"Resume",     "Save state", "Load state",
++                                                 "Achievements", "Fullscreen", "Quit game"};
+   const float pad = 36 * u, row = 66 * u, gap = 6 * u;
+   const float w = 600 * u;
+   constexpr float items = ITEM_COUNT;
+@@ -498,8 +515,403 @@
+   Hints(dl, p0.x + pad, p0.y + h - pad - 17 * u, u, saving ? "Save here" : "Load");
+ }
+ 
++// Badge colours for the icons: rank letters, special marks, and the 17 types the game uses.
++u32 BadgeColour(const std::string& name, const std::string& arg)
++{
++  struct Entry
++  {
++    const char* key;
++    u32 rgb;
++  };
++  static const Entry colours[] = {
++      {"C", 0xb5733c},        {"B", 0x8d99a6},        {"A", 0xe0a526},        {"S", 0xa855f7},
++      {"EX", 0xe5484d},       {"crown", 0xe0a526},    {"trophy", 0xe0a526},   {"star", 0xf0b429},
++      {"flame", 0xf0742a},    {"normal", 0x9ca3af},   {"fire", 0xef6a3a},     {"water", 0x3b8ee8},
++      {"electric", 0xe3b81a}, {"grass", 0x3fa650},    {"ice", 0x4cc3d9},      {"fighting", 0xc4572b},
++      {"poison", 0xa24bc2},   {"ground", 0xb08d4a},   {"flying", 0x7d92f0},   {"psychic", 0xec5f93},
++      {"bug", 0x8fbf2f},      {"rock", 0x9a8470},     {"ghost", 0x6f55b8},    {"dragon", 0x4a5bd0},
++      {"dark", 0x4f5f6b},     {"steel", 0x8da2b0}};
++  for (const Entry& e : colours)
++    if (arg == e.key || (arg.empty() && name == e.key))
++      return e.rgb;
++  return 0x2f8f57;
++}
++
++// An achievement icon: a coloured disc with a white shape when earned, a dim disc with a grey one when not.
++// spec is "rank:C", "crown", "crown:A", "trophy", "star", "flame", or "type:<name>" (see the achievements header).
++void DrawIcon(ImDrawList* dl, ImVec2 c, float r, const std::string& spec, bool earned, float a = 1.0f)
++{
++  const size_t colon = spec.find(':');
++  const std::string name = spec.substr(0, colon);
++  const std::string arg = colon == std::string::npos ? std::string() : spec.substr(colon + 1);
++  const u32 rgb = BadgeColour(name, arg);
++  const ImU32 disc = earned ? Fade(Rgb(rgb), a) : Fade(CARD_HOVER, a);
++  const ImU32 ink = earned ? Fade(TEXT, a) : Fade(FAINT, a);
++  dl->AddCircleFilled(c, r, disc, 48);
++  if (!earned)
++    dl->AddCircle(c, r, Fade(FAINT, a * 0.55f), 48, std::max(1.5f, r * 0.07f));
++  const float s = r * 0.56f;  // the shapes below are drawn in a -1 to 1 square
++  const auto at = [&](float x, float y) { return ImVec2(c.x + x * s, c.y + y * s); };
++  const auto fill = [&](std::initializer_list<ImVec2> pts) {
++    std::vector<ImVec2> v;
++    for (const ImVec2 p : pts)
++      v.push_back(at(p.x, p.y));
++    dl->AddConcavePolyFilled(v.data(), static_cast<int>(v.size()), ink);
++  };
++  const auto dot = [&](float x, float y, float rad, ImU32 col) { dl->AddCircleFilled(at(x, y), rad * s, col, 24); };
++  const auto line = [&](float x0, float y0, float x1, float y1, float w, ImU32 col) {
++    dl->AddLine(at(x0, y0), at(x1, y1), col, std::max(1.0f, w * s));
++  };
++  const auto flame = [&] {
++    fill({{0, -1}, {0.3f, -0.55f}, {0.65f, -0.1f}, {0.7f, 0.3f}, {0.5f, 0.75f}, {0, 1}, {-0.5f, 0.75f},
++          {-0.7f, 0.3f}, {-0.55f, -0.1f}, {-0.25f, -0.3f}, {-0.15f, -0.65f}});
++    dot(0, 0.5f, 0.3f, disc);
++  };
++  const auto droplet = [&](float ox, float k) {
++    fill({{ox, -1 * k}, {ox + 0.35f * k, -0.45f * k}, {ox + 0.65f * k, 0.05f * k}, {ox + 0.65f * k, 0.4f * k},
++          {ox + 0.45f * k, 0.75f * k}, {ox, 0.95f * k}, {ox - 0.45f * k, 0.75f * k}, {ox - 0.65f * k, 0.4f * k},
++          {ox - 0.65f * k, 0.05f * k}, {ox - 0.35f * k, -0.45f * k}});
++  };
++
++  const std::string kind = name == "type" ? arg : name;
++  if (kind == "rank")
++    TextCentred(dl, true, r * (arg.size() > 1 ? 0.95f : 1.25f), c.x, c.y, ink, arg.c_str());
++  else if (kind == "crown")
++  {
++    fill({{-0.95f, 0.6f}, {-0.95f, -0.55f}, {-0.45f, 0}, {0, -0.85f}, {0.45f, 0}, {0.95f, -0.55f}, {0.95f, 0.6f}});
++    dl->AddRectFilled(at(-0.95f, 0.72f), at(0.95f, 0.95f), ink);
++    if (!arg.empty())
++      TextCentred(dl, true, r * 0.5f, c.x, c.y + 0.12f * s, disc, arg.c_str());
++  }
++  else if (kind == "trophy")
++  {
++    fill({{-0.6f, -0.85f}, {0.6f, -0.85f}, {0.55f, -0.05f}, {0.3f, 0.35f}, {-0.3f, 0.35f}, {-0.55f, -0.05f}});
++    dl->AddCircle(at(-0.78f, -0.4f), 0.3f * s, ink, 16, std::max(1.5f, 0.13f * s));
++    dl->AddCircle(at(0.78f, -0.4f), 0.3f * s, ink, 16, std::max(1.5f, 0.13f * s));
++    dl->AddRectFilled(at(-0.12f, 0.35f), at(0.12f, 0.68f), ink);
++    dl->AddRectFilled(at(-0.45f, 0.68f), at(0.45f, 0.92f), ink);
++  }
++  else if (kind == "star")
++  {
++    std::vector<ImVec2> v;
++    for (int i = 0; i < 10; ++i)
++    {
++      const float ang = (-90.0f + 36.0f * i) * 3.14159265f / 180.0f, rad = (i % 2 == 0) ? 1.0f : 0.42f;
++      v.push_back(at(std::cos(ang) * rad, std::sin(ang) * rad));
++    }
++    dl->AddConcavePolyFilled(v.data(), 10, ink);
++  }
++  else if (kind == "flame" || kind == "fire")
++    flame();
++  else if (kind == "water")
++  {
++    droplet(0, 1);
++    dot(-0.2f, 0.4f, 0.14f, disc);
++  }
++  else if (kind == "poison")
++  {
++    droplet(-0.12f, 0.85f);
++    dot(0.62f, -0.5f, 0.22f, ink);
++    dot(0.8f, -0.05f, 0.14f, ink);
++  }
++  else if (kind == "electric")
++    fill({{0.25f, -1}, {-0.6f, 0.15f}, {-0.05f, 0.15f}, {-0.3f, 1}, {0.65f, -0.25f}, {0.05f, -0.25f}});
++  else if (kind == "grass")
++  {
++    fill({{-0.8f, 0.8f}, {-0.7f, 0.1f}, {-0.3f, -0.45f}, {0.3f, -0.8f}, {0.85f, -0.85f}, {0.8f, -0.2f},
++          {0.5f, 0.4f}, {0, 0.75f}, {-0.5f, 0.85f}});
++    line(-0.75f, 0.85f, 0.55f, -0.6f, 0.11f, disc);
++  }
++  else if (kind == "ice")
++  {
++    for (int i = 0; i < 3; ++i)
++    {
++      const float ang = i * 60.0f * 3.14159265f / 180.0f, x = std::cos(ang), y = std::sin(ang);
++      line(-0.9f * x, -0.9f * y, 0.9f * x, 0.9f * y, 0.16f, ink);
++      dot(0.9f * x, 0.9f * y, 0.13f, ink);
++      dot(-0.9f * x, -0.9f * y, 0.13f, ink);
++    }
++  }
++  else if (kind == "fighting")
++  {
++    dl->AddRectFilled(at(-0.75f, -0.2f), at(0.75f, 0.85f), ink, 0.25f * s);
++    for (const float x : {-0.52f, -0.17f, 0.18f, 0.53f})
++      dot(x, -0.38f, 0.27f, ink);
++    for (const float x : {-0.35f, 0.0f, 0.35f})
++      line(x, -0.4f, x, 0.15f, 0.07f, disc);
++  }
++  else if (kind == "ground")
++  {
++    fill({{-0.95f, 0.8f}, {-0.3f, -0.6f}, {0.35f, 0.8f}});
++    fill({{-0.1f, 0.8f}, {0.45f, -0.25f}, {0.95f, 0.8f}});
++    line(-0.95f, 0.88f, 0.95f, 0.88f, 0.14f, ink);
++  }
++  else if (kind == "flying")
++    fill({{-0.95f, 0.55f}, {-0.45f, -0.55f}, {0.1f, -0.9f}, {0.95f, -0.7f}, {0.35f, -0.35f}, {0.8f, -0.1f},
++          {0.1f, 0.1f}, {0.55f, 0.5f}, {-0.2f, 0.35f}});
++  else if (kind == "psychic")
++  {
++    fill({{-1, 0}, {-0.55f, -0.5f}, {0, -0.7f}, {0.55f, -0.5f}, {1, 0}, {0.55f, 0.5f}, {0, 0.7f}, {-0.55f, 0.5f}});
++    dot(0, 0, 0.42f, disc);
++    dot(0, 0, 0.2f, ink);
++  }
++  else if (kind == "bug")
++  {
++    dot(0, 0.22f, 0.55f, ink);
++    dot(0, -0.55f, 0.32f, ink);
++    for (const float sign : {-1.0f, 1.0f})
++    {
++      line(sign * 0.45f, 0.0f, sign * 0.98f, -0.15f, 0.1f, ink);
++      line(sign * 0.5f, 0.3f, sign * 1.0f, 0.4f, 0.1f, ink);
++      line(sign * 0.3f, -0.8f, sign * 0.6f, -1.0f, 0.1f, ink);
++    }
++    line(0, -0.2f, 0, 0.75f, 0.07f, disc);
++  }
++  else if (kind == "rock")
++  {
++    fill({{-0.85f, 0.2f}, {-0.5f, -0.7f}, {0.25f, -0.9f}, {0.9f, -0.25f}, {0.65f, 0.7f}, {-0.3f, 0.85f}});
++    line(-0.5f, -0.7f, 0, 0.05f, 0.08f, disc);
++    line(0.25f, -0.9f, 0, 0.05f, 0.08f, disc);
++    line(0, 0.05f, -0.3f, 0.85f, 0.08f, disc);
++  }
++  else if (kind == "ghost")
++  {
++    dot(0, -0.1f, 0.7f, ink);
++    dl->AddRectFilled(at(-0.7f, -0.1f), at(0.7f, 0.7f), ink);
++    for (const float x : {-0.47f, 0.0f, 0.47f})
++      dot(x, 0.7f, 0.235f, ink);
++    dot(-0.25f, -0.15f, 0.15f, disc);
++    dot(0.25f, -0.15f, 0.15f, disc);
++  }
++  else if (kind == "dragon")
++  {
++    fill({{-0.95f, -0.9f}, {-0.35f, -0.1f}, {0.35f, -0.1f}, {0.95f, -0.9f}, {0.75f, 0.25f}, {0, 0.95f},
++          {-0.75f, 0.25f}});
++    dot(-0.28f, 0.2f, 0.1f, disc);
++    dot(0.28f, 0.2f, 0.1f, disc);
++  }
++  else if (kind == "dark")
++  {
++    dot(0, 0, 0.85f, ink);
++    dot(0.4f, -0.3f, 0.72f, disc);
++  }
++  else if (kind == "steel")
++  {
++    fill({{0, -0.95f}, {0.82f, -0.48f}, {0.82f, 0.48f}, {0, 0.95f}, {-0.82f, 0.48f}, {-0.82f, -0.48f}});
++    dot(0, 0, 0.38f, disc);
++  }
++  else  // normal, and anything unknown: a ring with a dot
++  {
++    dl->AddCircle(c, 0.8f * s, ink, 32, std::max(1.5f, 0.22f * s));
++    dot(0, 0, 0.28f, ink);
++  }
++}
++
++// A round check badge: filled when earned, an outline when not.
++void CheckBadge(ImDrawList* dl, ImVec2 c, float r, float u, bool done, float a = 1.0f)
++{
++  if (!done)
++  {
++    dl->AddCircle(c, r, Fade(FAINT, a), 0, 2.5f * u);
++    return;
++  }
++  dl->AddCircleFilled(c, r, Fade(ACCENT, a));
++  const ImVec2 pts[3] = {ImVec2(c.x - r * 0.42f, c.y + r * 0.02f), ImVec2(c.x - r * 0.1f, c.y + r * 0.34f),
++                         ImVec2(c.x + r * 0.46f, c.y - r * 0.32f)};
++  dl->AddPolyline(pts, 3, Fade(TEXT, a), 0, std::max(2.0f, r * 0.17f));
++}
++
++void DrawAchievements(ImDrawList* dl, ImVec2 ds, float u)
++{
++  const std::vector<achievements::Item> items = achievements::Snapshot();
++  const int total = static_cast<int>(items.size());
++  int earned = 0;
++  for (const auto& item : items)
++    earned += item.unlocked ? 1 : 0;
++  const float pad = 40 * u, row = 78 * u;
++  const float w = std::min(ds.x * 0.92f, 1100 * u);
++  const float h = pad + 50 * u + 16 * u + 26 * u + 24 * u + ACH_ROWS * row + 20 * u + 34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  Text(dl, true, 44 * u, p0.x + pad, p0.y + pad + 25 * u, TEXT, "Achievements");
++  if (total)
++  {
++    const std::string count = std::to_string(earned) + " of " + std::to_string(total);
++    Text(dl, true, 30 * u, p0.x + w - pad - Measure(true, 30 * u, count.c_str()).x, p0.y + pad + 25 * u,
++         MUTED, count.c_str());
++  }
++  Text(dl, false, 24 * u, p0.x + pad, p0.y + pad + 50 * u + 16 * u + 13 * u, MUTED,
++       total ? "Earned by playing. Up and down scroll, left and right turn the page." : "There are no achievements for this version yet.");
++  const float top = p0.y + pad + 50 * u + 16 * u + 26 * u + 24 * u;
++  for (int i = 0; i < ACH_ROWS && g.scroll + i < total; ++i)
++  {
++    const achievements::Item& item = items[g.scroll + i];
++    const float y = top + i * row;
++    dl->AddRectFilled(ImVec2(p0.x + pad - 14 * u, y), ImVec2(p0.x + w - pad + 14 * u, y + row - 8 * u), CARD,
++                      12 * u);
++    const ImVec2 ic(p0.x + pad + 26 * u, y + (row - 8 * u) * 0.5f);
++    DrawIcon(dl, ic, 26 * u, item.icon.empty() ? "star" : item.icon, item.unlocked);
++    if (item.unlocked)
++      CheckBadge(dl, ImVec2(ic.x + 18 * u, ic.y + 18 * u), 10 * u, u, true);
++    const float x = p0.x + pad + 70 * u;
++    Text(dl, true, 28 * u, x, y + 24 * u, item.unlocked ? TEXT : MUTED, item.title.c_str());
++    Text(dl, false, 22 * u, x, y + 52 * u, item.unlocked ? MUTED : FAINT, item.text.c_str());
++  }
++  if (total > ACH_ROWS)  // where the visible rows sit in the list
++  {
++    const float track = ACH_ROWS * row - 8 * u, x = p0.x + w - pad + 30 * u;
++    const float thumb = std::max(40 * u, track * ACH_ROWS / total);
++    const float at = (track - thumb) * g.scroll / std::max(1, total - ACH_ROWS);
++    dl->AddRectFilled(ImVec2(x, top), ImVec2(x + 6 * u, top + track), CARD, 3 * u);
++    dl->AddRectFilled(ImVec2(x, top + at), ImVec2(x + 6 * u, top + at + thumb), ACCENT_LIGHT, 3 * u);
++  }
++  Hints(dl, p0.x + pad, p0.y + h - pad - 17 * u, u, "Options");
++}
++
++// Sets on and off, pop-ups on and off, and the way into the reset.
++void DrawAchOptions(ImDrawList* dl, ImVec2 ds, float u)
++{
++  const std::vector<achievements::SetInfo> sets = achievements::Sets();
++  const int rows = static_cast<int>(sets.size()) + 2;
++  const float pad = 36 * u, row = 66 * u, gap = 6 * u, w = 760 * u;
++  const float h = pad + 56 * u + 26 * u + rows * row + (rows - 1) * gap + 34 * u + 34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  Text(dl, true, 48 * u, p0.x + pad, p0.y + pad + 26 * u, TEXT, "Achievement options");
++  float y = p0.y + pad + 56 * u + 26 * u;
++  for (int i = 0; i < rows; ++i)
++  {
++    const bool sel = g.option == i;
++    const int n = static_cast<int>(sets.size());
++    const std::string label = i < n ? sets[i].title : (i == n ? "Pop-ups" : "Reset achievements");
++    std::string value = i < n ? std::string(sets[i].enabled ? "On" : "Off") + "   " + std::to_string(sets[i].earned) + " of " +
++                                    std::to_string(sets[i].total) :
++                                (i == n ? (achievements::Popups() ? "On" : "Off") : "");
++    const ImVec2 r0(p0.x + pad - 14 * u, y), r1(p0.x + w - pad + 14 * u, y + row);
++    if (sel)
++      dl->AddRectFilled(r0, r1, ACCENT, 12 * u);
++    Text(dl, sel, 30 * u, p0.x + pad + 6 * u, y + row * 0.5f, TEXT, label.c_str());
++    const ImVec2 m = Measure(true, 26 * u, value.c_str());
++    Text(dl, true, 26 * u, r1.x - 22 * u - m.x, y + row * 0.5f, sel ? TEXT : MUTED, value.c_str());
++    y += row + gap;
++  }
++  Hints(dl, p0.x + pad, p0.y + h - pad - 17 * u, u, "Select");
++}
++
++// "Are you sure?", answered No unless you move to Yes.
++void DrawResetAsk(ImDrawList* dl, ImVec2 ds, float u)
++{
++  const float pad = 40 * u, w = 820 * u, button = 70 * u, gap = 20 * u;
++  const float h = pad + 50 * u + 22 * u + 30 * u + 18 * u + 30 * u + 30 * u + 26 * u + button + 30 * u + 34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  float y = p0.y + pad;
++  Text(dl, true, 44 * u, p0.x + pad, y + 25 * u, TEXT, "Reset achievements");
++  y += 50 * u + 22 * u;
++  Text(dl, true, 30 * u, p0.x + pad, y + 15 * u, TEXT, "Are you sure you want to reset your achievements?");
++  y += 30 * u + 18 * u;
++  Text(dl, false, 24 * u, p0.x + pad, y + 12 * u, MUTED, "Achievements come from the progress in your save.");
++  y += 30 * u;
++  Text(dl, false, 24 * u, p0.x + pad, y + 12 * u, MUTED, "A save that already has them earns them back right away.");
++  y += 30 * u + 26 * u;
++  const float bw = (w - 2 * pad - gap) * 0.5f;
++  for (int i = 0; i < 2; ++i)  // No first, then Yes
++  {
++    const bool yes = i == 1, sel = g.ask_yes == yes;
++    const ImVec2 b0(p0.x + pad + i * (bw + gap), y), b1(b0.x + bw, y + button);
++    dl->AddRectFilled(b0, b1, sel ? ACCENT : CARD, 14 * u);
++    if (sel)
++      dl->AddRect(b0, b1, ACCENT_LIGHT, 14 * u, 0, 3 * u);
++    TextCentred(dl, true, 30 * u, (b0.x + b1.x) * 0.5f, y + button * 0.5f, TEXT, yes ? "Yes, reset" : "No");
++  }
++  y += button + 30 * u;
++  Hints(dl, p0.x + pad, y + 17 * u, u, "Select");
++}
++
++// Hold the confirm button: the bar fills over five seconds and a full bar erases the achievements.
++void DrawResetHold(ImDrawList* dl, ImVec2 ds, float u)
++{
++  const float pad = 40 * u, w = 820 * u, bar = 34 * u;
++  const float h = pad + 50 * u + 22 * u + 30 * u + 18 * u + 30 * u + 30 * u + bar + 30 * u + 34 * u + pad;
++  const ImVec2 p0(std::round((ds.x - w) * 0.5f), std::round((ds.y - h) * 0.5f));
++  dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), PANEL, 20 * u);
++  dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h), PANEL_EDGE, 20 * u, 0, 2 * u);
++  float y = p0.y + pad;
++  Text(dl, true, 44 * u, p0.x + pad, y + 25 * u, TEXT, "Hold to reset");
++  y += 50 * u + 22 * u;
++  Text(dl, true, 30 * u, p0.x + pad, y + 15 * u, TEXT, "Hold A or Enter for 5 seconds.");
++  y += 30 * u + 18 * u;
++  Text(dl, false, 24 * u, p0.x + pad, y + 12 * u, MUTED, "Let go to cancel. This erases your achievements for this version.");
++  y += 30 * u + 30 * u;
++  const ImVec2 b0(p0.x + pad, y), b1(p0.x + w - pad, y + bar);
++  dl->AddRectFilled(b0, b1, CARD, bar * 0.5f);
++  if (g.hold > 0.0f)
++    dl->AddRectFilled(b0, ImVec2(b0.x + std::max(bar, (b1.x - b0.x) * g.hold), b1.y), ACCENT_LIGHT, bar * 0.5f);
++  y += bar + 30 * u;
++  Hint(dl, p0.x + pad, y + 17 * u, u, "B", "Esc", "Cancel");
++}
++
++// The pop-up for a new achievement, top centre, drawn over the game whether or not the menu is open.
++void DrawAchievementToast()
++{
++  achievements::Item item;
++  float shown;
++  if (!achievements::CurrentToast(&item, &shown))
++    return;
++  const ImVec2 ds = ImGui::GetIO().DisplaySize;
++  const float u = std::min(ds.y / 1080.0f, ds.x / 1600.0f);
++  const float a = std::clamp(std::min(shown / 0.3f, (5.0f - shown) / 0.4f), 0.0f, 1.0f);
++  ImDrawList* dl = ImGui::GetForegroundDrawList();
++  const float pad = 22 * u, badge = 64 * u;
++  const float text_w = std::max(Measure(true, 30 * u, item.title.c_str()).x, Measure(false, 22 * u, item.text.c_str()).x);
++  const float w = pad * 3 + badge + text_w, h = pad * 2 + badge;
++  const ImVec2 b0(std::round((ds.x - w) * 0.5f), std::round(36 * u + (1.0f - a) * -20 * u)), b1(b0.x + w, b0.y + h);
++  dl->AddRectFilled(b0, b1, Fade(PANEL, a), 18 * u);
++  dl->AddRect(b0, b1, Fade(ACCENT_LIGHT, a), 18 * u, 0, 2 * u);
++  const ImVec2 ic(b0.x + pad + badge * 0.5f, b0.y + h * 0.5f);
++  DrawIcon(dl, ic, badge * 0.5f, item.icon.empty() ? "star" : item.icon, true, a);
++  CheckBadge(dl, ImVec2(ic.x + badge * 0.36f, ic.y + badge * 0.36f), badge * 0.19f, u, true, a);
++  const float x = b0.x + pad * 2 + badge;
++  Text(dl, true, 30 * u, x, b0.y + pad + 18 * u, Fade(TEXT, a), item.title.c_str());
++  Text(dl, false, 22 * u, x, b0.y + pad + 50 * u, Fade(MUTED, a), item.text.c_str());
++}
++
++// Developer aid: RR_ICON_SHEET=1 draws every icon, earned and not, over the game.
++void DrawIconSheet()
++{
++  static const char* const specs[] = {
++      "rank:C", "rank:B", "rank:A", "rank:S", "rank:EX", "crown", "crown:A", "trophy", "star", "flame",
++      "type:normal", "type:fire", "type:water", "type:electric", "type:grass", "type:ice", "type:fighting",
++      "type:poison", "type:ground", "type:flying", "type:psychic", "type:bug", "type:rock", "type:ghost",
++      "type:dragon", "type:dark", "type:steel"};
++  const ImVec2 ds = ImGui::GetIO().DisplaySize;
++  const float u = std::min(ds.y / 1080.0f, ds.x / 1600.0f);
++  ImDrawList* dl = ImGui::GetForegroundDrawList();
++  dl->AddRectFilled(ImVec2(0, 0), ds, Rgb(0x10251a, 235));
++  const int columns = 9;
++  const float cell = 120 * u;
++  for (int i = 0; i < static_cast<int>(std::size(specs)); ++i)
++  {
++    const ImVec2 c(80 * u + (i % columns) * cell, 90 * u + (i / columns) * cell * 2);
++    DrawIcon(dl, c, 38 * u, specs[i], true);
++    DrawIcon(dl, ImVec2(c.x, c.y + cell * 0.95f), 38 * u, specs[i], false);
++    Text(dl, false, 16 * u, c.x - 36 * u, c.y + 50 * u, MUTED, specs[i]);
++  }
++}
++
+ void Draw()
+ {
++  static const bool icon_sheet = std::getenv("RR_ICON_SHEET") != nullptr;
++  if (icon_sheet)
++  {
++    DrawIconSheet();
++    return;
++  }
++  achievements::Tick();
++  DrawAchievementToast();
+   if (!g.open.load())
+     return;
+   std::lock_guard lock(g.mutex);
+@@ -512,6 +924,14 @@
+   dl->AddRectFilled(ImVec2(0, 0), ds, DIM);
+   if (g.page == Page::Main)
+     DrawMain(dl, ds, u);
++  else if (g.page == Page::Achievements)
++    DrawAchievements(dl, ds, u);
++  else if (g.page == Page::AchOptions)
++    DrawAchOptions(dl, ds, u);
++  else if (g.page == Page::ResetAsk)
++    DrawResetAsk(dl, ds, u);
++  else if (g.page == Page::ResetHold)
++    DrawResetHold(dl, ds, u);
+   else
+     DrawSlots(dl, ds, u);
+   if (!g.toast.empty() && Clock::now() < g.toast_until)
+@@ -746,6 +1166,10 @@
+       g.page = g.item == ITEM_SAVE ? Page::Save : Page::Load;
+       g.slot = g.page == Page::Load ? newest : 0;  // loading starts on the newest save
+       return Action::None;
++    case ITEM_ACHIEVEMENTS:
++      g.page = Page::Achievements;
++      g.scroll = 0;
++      return Action::None;
+     case ITEM_FULLSCREEN:
+       if (s_platform)
+         s_platform->RequestToggleFullscreen();
+@@ -755,6 +1179,56 @@
+       return Action::Quit;
+     }
+     return Action::None;
++  }
++  if (g.page == Page::Achievements)
++  {
++    g.scroll = std::clamp(g.scroll + dy + dx * ACH_ROWS, 0, std::max(0, static_cast<int>(achievements::Snapshot().size()) - ACH_ROWS));
++    if (back)
++      g.page = Page::Main;
++    else if (confirm)
++    {
++      g.page = Page::AchOptions;
++      g.option = 0;
++    }
++    return Action::None;
++  }
++  if (g.page == Page::AchOptions)
++  {
++    const int sets = static_cast<int>(achievements::Sets().size());
++    g.option = std::clamp(g.option + dy, 0, sets + 1);  // the sets, then pop-ups, then reset
++    if (back)
++      g.page = Page::Achievements;
++    else if (confirm && g.option < sets)
++      achievements::ToggleSet(g.option);
++    else if (confirm && g.option == sets)
++      achievements::TogglePopups();
++    else if (confirm)
++    {
++      g.page = Page::ResetAsk;
++      g.ask_yes = false;
++    }
++    return Action::None;
++  }
++  if (g.page == Page::ResetAsk)
++  {
++    if (dx || dy)
++      g.ask_yes = !g.ask_yes;
++    if (back || (confirm && !g.ask_yes))
++      g.page = Page::AchOptions;
++    else if (confirm)
++    {
++      g.page = Page::ResetHold;
++      g.hold = 0.0f;
++      g.holding = false;
++      g.hold_armed = false;  // the press that said Yes must not start the hold
++    }
++    return Action::None;
++  }
++  if (g.page == Page::ResetHold)
++  {
++    if (back)
++      g.page = Page::AchOptions;
++    return Action::None;  // the hold itself is read in Loop
+   }
+   g.slot = std::clamp(g.slot + dx, 0, SLOTS - 1);
+   if (back)
+@@ -851,6 +1325,7 @@
+       case 0x0D: case 'J': confirm = true; break;     // Enter, J
+       case 0x08: case 'K': back = true; break;        // Backspace, K
+       case 0x1B: home = true; break;                  // Escape
++      case 0xE001: s_forced_hold_until = Clock::now() + std::chrono::seconds(7); break;  // automation: "hold"
+       }
+     }
+     last = pad;
+@@ -870,6 +1345,42 @@
+       back = true;  // Escape or HOME on a slot page goes back first
+     }
+ 
++    {
++      // The reset page reads the confirm button as held, not pressed: holding it fills the bar, letting go
++      // empties it, and a full bar erases the achievements.
++      std::lock_guard lock(g.mutex);
++      if (g.page == Page::ResetHold)
++      {
++        bool held = pad.confirm;
++#ifdef _WIN32
++        held = held || (GetAsyncKeyState(VK_RETURN) & 0x8000) || (GetAsyncKeyState('J') & 0x8000);
++#endif
++        held = held || Clock::now() < s_forced_hold_until;
++        if (!held)
++        {
++          g.hold_armed = true;
++          g.holding = false;
++          g.hold = 0.0f;
++        }
++        else if (g.hold_armed)
++        {
++          const auto at = Clock::now();
++          if (!g.holding)
++          {
++            g.holding = true;
++            g.hold_start = at;
++          }
++          g.hold = std::min(1.0f, std::chrono::duration<float>(at - g.hold_start).count() / HOLD_SECONDS);
++          if (g.hold >= 1.0f)
++          {
++            achievements::ResetAll();
++            g.page = Page::AchOptions;
++            Toast("Achievements reset");
++          }
++        }
++      }
++    }
++
+     int slot = 0;
+     const Action action = Navigate(dx, dy, confirm, back, &slot);
+     if (action == Action::Save)
+@@ -916,6 +1427,7 @@
+   else
+     SetTheme(GREEN);
+   s_dir = std::move(state_directory);
++  achievements::Load(s_dir);
+   s_platform = platform;
+   VideoCommon::OnScreenUI::custom_init = AddFonts;
+   VideoCommon::OnScreenUI::custom_draw = Draw;
+--- /dev/null
++++ b/src/runtime/rumble_achievements.cpp
+@@ -0,0 +1,568 @@
++// RumbleRecomp: achievements (see rumble_achievements.hpp).
++//
++// The game keeps its progress in the current save slot (a 0x1360-byte block). Its address is found through
++// the game's save manager (pointer at 0x804B90D0: slot array pointer at +0x44, current slot at +4), and
++// stage and battle royale progress is a table of words inside it, found by the game itself the same way
++// (IsStageCleared, IncMapClearedNum):
++//
++//   slot + 0x18 + A * 0x640 + B * 0x140 + C * 0x28 + D * 4
++//
++// The top 10 bits of each word count how many times that entry has been started (not cleared: the count goes up
++// when a battle begins), bit 0 is set once the entry is open to play (the game opens the next rank when you win
++// the one before), bit 1 once it has been played. What A, B, C, and D stand for is noted beside the entries in
++// use, in the set files under tools/achievements.
++
++#include "rumble_achievements.hpp"
++
++#include "Common/CommonTypes.h"
++#include "Core/HW/Memmap.h"
++#include "Core/System.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <ctime>
++#include <deque>
++#include <fstream>
++#include <map>
++#include <mutex>
++#include <sstream>
++
++namespace moderngekko::achievements
++{
++namespace
++{
++using Clock = std::chrono::steady_clock;
++
++constexpr u32 SAVE_MANAGER = 0x804B90D0;
++constexpr u32 SLOT_SIZE = 0x1360;
++constexpr u32 TABLE_START = 0x18;
++constexpr int CHECK_MS = 500;
++constexpr int TOAST_SECONDS = 5;
++
++enum class Op { Eq, Ne, Ge, Le, Gt, Lt, And };
++
++struct Term
++{
++  enum Kind { Count, Flag, Mem, Dex } kind = Mem;
++  u32 a = 0, b = 0, c = 0, d = 0;  // Count, Flag: the table entry
++  u32 size = 4, addr = 0;          // Mem
++  Op op = Op::Ge;
++  u32 value = 1;
++  std::vector<u16> list;  // Dex: the species (dex numbers)
++  u32 min = 1;            // Dex: how many of the list must hold
++  bool shiny = false;     // Dex: look for a shiny befriended, not the collection status
++  bool alt = false;       // starts an alternative: the entry holds if any group of terms (split by "|") holds
++};
++
++struct Set
++{
++  std::string id, title;
++  bool enabled = true;
++};
++
++struct Entry
++{
++  Item item;
++  size_t set = 0;
++  std::vector<Term> terms;
++  int streak = 0;  // consecutive checks where every term held
++};
++
++std::mutex s_mutex;
++std::vector<Set> s_sets;
++std::vector<Entry> s_entries;
++std::filesystem::path s_unlock_path, s_sets_path, s_options_path;
++bool s_popups = true;
++std::deque<Item> s_pending;  // the front one is on screen once s_toast_active
++bool s_toast_active = false;
++Clock::time_point s_toast_start, s_last_check;
++
++bool Read(u32 addr, u32 size, u32* out)
++{
++  const u8* p = Core::System::GetInstance().GetMemory().GetPointerForRange(addr, size);
++  if (!p)
++    return false;
++  u32 v = 0;
++  for (u32 i = 0; i < size; ++i)
++    v = (v << 8) | p[i];
++  *out = v;
++  return true;
++}
++
++// The collection (what the game's Collection screen shows) is an array of 0x1C-byte records indexed by dex
++// number, owned by an object {array pointer, count, count, ...} that the game allocates once a save is loaded:
++//
++//   +0x00 status: 0 unseen, 1 seen, 2 defeated, 3 befriended
++//   +0x10 times defeated, +0x14 mask of normal forms befriended, +0x18 mask of shiny forms befriended
++//
++// The object lives on the heap, so it is found by looking for it in main memory (and kept while it stays valid).
++constexpr u32 MEM1_START = 0x80000000, MEM1_SIZE = 0x1800000, DEX_RECORD = 0x1C;
++u32 s_dex_object = 0;
++Clock::time_point s_dex_scan;
++
++bool DexObjectValid(u32 object, u32* array, u32* count, bool deep)
++{
++  u32 n2;
++  if (!Read(object, 4, array) || !Read(object + 4, 4, count) || !Read(object + 8, 4, &n2) || *count != n2 ||
++      *count < 400 || *count > 700 || *array < MEM1_START || *array + *count * DEX_RECORD > MEM1_START + MEM1_SIZE)
++    return false;
++  u32 w;
++  if (!Read(*array, 4, &w) || w != 0)
++    return false;
++  if (deep)
++    for (u32 i = 1; i < *count; ++i)
++      if (!Read(*array + i * DEX_RECORD, 4, &w) || w > 3)
++        return false;
++  return true;
++}
++
++bool DexArray(u32* array, u32* count)
++{
++  if (s_dex_object && DexObjectValid(s_dex_object, array, count, false))
++    return true;
++  s_dex_object = 0;
++  const auto now = Clock::now();
++  if (now - s_dex_scan < std::chrono::seconds(5))
++    return false;
++  s_dex_scan = now;
++  const u8* p = Core::System::GetInstance().GetMemory().GetPointerForRange(MEM1_START, MEM1_SIZE);
++  if (!p)
++    return false;
++  auto word = [p](u32 i) { return u32(p[i * 4]) << 24 | u32(p[i * 4 + 1]) << 16 | u32(p[i * 4 + 2]) << 8 | p[i * 4 + 3]; };
++  for (u32 i = 0; i + 3 < MEM1_SIZE / 4; ++i)
++  {
++    const u32 n = word(i + 1);
++    if (n < 400 || n > 700 || word(i + 2) != n)
++      continue;
++    const u32 object = MEM1_START + i * 4;
++    if (DexObjectValid(object, array, count, true))
++    {
++      s_dex_object = object;
++      return true;
++    }
++  }
++  return false;
++}
++
++bool TableWord(const Term& t, u32* word)
++{
++  u32 manager, slots, current;
++  if (!Read(SAVE_MANAGER, 4, &manager) || manager < 0x80000000 || !Read(manager + 0x44, 4, &slots) ||
++      !Read(manager + 4, 1, &current) || current > 2)
++    return false;
++  const u32 index = TABLE_START + t.a * 0x640 + t.b * 0x140 + t.c * 0x28 + t.d * 4;
++  return Read(slots + current * SLOT_SIZE + index, 4, word);
++}
++
++bool Holds(const Term& t)
++{
++  u32 v;
++  if (t.kind == Term::Count)
++    return TableWord(t, &v) && (v >> 22) >= t.value;
++  if (t.kind == Term::Flag)
++    return TableWord(t, &v) && (v & t.value) != 0;
++  if (t.kind == Term::Dex)
++  {
++    u32 array, count, have = 0;
++    if (!DexArray(&array, &count))
++      return false;
++    for (const u16 id : t.list)
++    {
++      if (id >= count)
++        continue;
++      const bool ok = t.shiny ? Read(array + id * DEX_RECORD + 0x18, 4, &v) && v != 0 :
++                                Read(array + id * DEX_RECORD, 4, &v) && v >= t.value;
++      have += ok;
++    }
++    return have >= t.min;
++  }
++  if (!Read(t.addr, t.size, &v))
++    return false;
++  switch (t.op)
++  {
++  case Op::Eq: return v == t.value;
++  case Op::Ne: return v != t.value;
++  case Op::Ge: return v >= t.value;
++  case Op::Le: return v <= t.value;
++  case Op::Gt: return v > t.value;
++  case Op::Lt: return v < t.value;
++  case Op::And: return (v & t.value) != 0;
++  }
++  return false;
++}
++
++std::string Trim(const std::string& s)
++{
++  const size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
++  return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
++}
++
++bool ParseTerm(const std::string& text, Term* t)
++{
++  std::istringstream in(text);
++  std::string kind;
++  in >> kind;
++  if (kind == "count" || kind == "flag")
++  {
++    std::string tok[5];
++    for (std::string& s : tok)
++      in >> s;
++    t->kind = kind == "count" ? Term::Count : Term::Flag;
++    t->a = std::strtoul(tok[0].c_str(), nullptr, 0);
++    t->b = std::strtoul(tok[1].c_str(), nullptr, 0);
++    t->c = std::strtoul(tok[2].c_str(), nullptr, 0);
++    t->d = std::strtoul(tok[3].c_str(), nullptr, 0);
++    t->value = tok[4].empty() ? 1 : std::strtoul(tok[4].c_str(), nullptr, 0);  // count: at least; flag: mask
++    return !tok[3].empty() && t->a < 3 && t->b < 5 && t->c < 8 && t->d < 10;
++  }
++  if (kind == "dex" || kind == "shiny")
++  {
++    // dex LIST [LEVEL [MIN]]: at least MIN (all by default) of LIST ("10", "1-12,25") are at LEVEL (3, befriended)
++    // or more. shiny LIST [MIN]: at least MIN (1) of LIST have a shiny form befriended.
++    std::string list, a, b;
++    in >> list >> a >> b;
++    t->kind = Term::Dex;
++    t->shiny = kind == "shiny";
++    std::istringstream items(list);
++    std::string item;
++    while (std::getline(items, item, ','))
++    {
++      const size_t dash = item.find('-');
++      const u32 lo = std::strtoul(item.c_str(), nullptr, 10);
++      const u32 hi = dash == std::string::npos ? lo : std::strtoul(item.c_str() + dash + 1, nullptr, 10);
++      if (lo == 0 || hi < lo || hi > 1023)
++        return false;
++      for (u32 i = lo; i <= hi; ++i)
++        t->list.push_back(static_cast<u16>(i));
++    }
++    if (t->list.empty())
++      return false;
++    if (t->shiny)
++      t->min = a.empty() ? 1 : std::strtoul(a.c_str(), nullptr, 0);
++    else
++    {
++      t->value = a.empty() ? 3 : std::strtoul(a.c_str(), nullptr, 0);
++      t->min = b.empty() ? static_cast<u32>(t->list.size()) : std::strtoul(b.c_str(), nullptr, 0);
++    }
++    return true;
++  }
++  if (kind == "mem8" || kind == "mem16" || kind == "mem32")
++  {
++    std::string addr, op, value;
++    in >> addr >> op >> value;
++    t->size = kind == "mem8" ? 1 : kind == "mem16" ? 2 : 4;
++    t->addr = std::strtoul(addr.c_str(), nullptr, 0);
++    t->value = std::strtoul(value.c_str(), nullptr, 0);
++    if (op == "==") t->op = Op::Eq;
++    else if (op == "!=") t->op = Op::Ne;
++    else if (op == ">=") t->op = Op::Ge;
++    else if (op == "<=") t->op = Op::Le;
++    else if (op == ">") t->op = Op::Gt;
++    else if (op == "<") t->op = Op::Lt;
++    else if (op == "&") t->op = Op::And;
++    else return false;
++    return !value.empty();
++  }
++  return false;
++}
++
++bool ParseCondition(const std::string& text, std::vector<Term>* terms)
++{
++  size_t start = 0;
++  bool first_of_group = false;
++  while (start <= text.size())
++  {
++    size_t end = text.find_first_of(";|", start);
++    const std::string part = Trim(text.substr(start, end == std::string::npos ? end : end - start));
++    Term t;
++    if (!ParseTerm(part, &t))
++      return false;
++    t.alt = first_of_group;
++    terms->push_back(t);
++    if (end == std::string::npos)
++      break;
++    first_of_group = text[end] == '|';
++    start = end + 1;
++  }
++  return !terms->empty();
++}
++
++// Reads one set file into s_sets and s_entries, unless it is for other versions.
++void LoadSet(const std::filesystem::path& file, const std::string& version,
++             const std::map<std::string, bool>& chosen)
++{
++  std::ifstream in(file);
++  if (!in)
++  {
++    std::fprintf(stderr, "[achievements] cannot open %s\n", file.string().c_str());
++    return;
++  }
++  Set set;
++  set.id = file.stem().string();
++  set.title = set.id;
++  bool on = true;
++  std::vector<std::string> versions;
++  std::vector<Entry> entries;
++  std::string line;
++  while (std::getline(in, line))
++  {
++    const std::string text = Trim(line);
++    if (text.empty() || text[0] == '#')
++      continue;
++    if (text[0] == '@')
++    {
++      std::istringstream row(text.substr(1));
++      std::string key;
++      row >> key;
++      const std::string rest = Trim(text.substr(std::min(text.size(), 1 + key.size())));
++      if (key == "title")
++        set.title = rest;
++      else if (key == "default")
++        on = rest != "off";
++      else if (key == "versions")
++        for (std::string v; row >> v;)
++          versions.push_back(v);
++      continue;
++    }
++    std::vector<std::string> field;
++    std::istringstream row(line);
++    for (std::string f; std::getline(row, f, '\t');)
++      field.push_back(Trim(f));
++    Entry e;
++    if ((field.size() != 4 && field.size() != 5) || !ParseCondition(field[3], &e.terms))
++    {
++      std::fprintf(stderr, "[achievements] skipped a bad line: %s\n", line.c_str());
++      continue;
++    }
++    e.item = {set.id + ":" + field[0], field[1], field[2], false, field.size() == 5 ? field[4] : std::string()};
++    entries.push_back(std::move(e));
++  }
++  if (!versions.empty() && std::find(versions.begin(), versions.end(), version) == versions.end())
++    return;
++  const auto it = chosen.find(set.id);
++  set.enabled = it != chosen.end() ? it->second : on;
++  for (Entry& e : entries)
++  {
++    e.set = s_sets.size();
++    s_entries.push_back(std::move(e));
++  }
++  s_sets.push_back(std::move(set));
++}
++
++void SaveChoices()
++{
++  std::filesystem::create_directories(s_sets_path.parent_path());
++  std::ofstream sets(s_sets_path, std::ios::trunc);
++  for (const Set& s : s_sets)
++    sets << s.id << ' ' << (s.enabled ? "on" : "off") << '\n';
++  std::ofstream options(s_options_path, std::ios::trunc);
++  options << "popups " << (s_popups ? "on" : "off") << '\n';
++}
++}  // namespace
++
++void Load(const std::filesystem::path& state_directory)
++{
++  const char* list = std::getenv("RR_ACHIEVEMENTS");
++  if (!list || !*list)
++    return;
++  std::lock_guard lock(s_mutex);
++  s_sets.clear();
++  s_entries.clear();
++  s_pending.clear();
++  s_unlock_path = state_directory / "achievements.txt";
++  s_sets_path = state_directory / "achievement_sets.txt";
++  s_options_path = state_directory.parent_path() / "achievement_options.txt";
++  const std::string version = state_directory.filename().string();
++
++  std::map<std::string, bool> chosen;
++  {
++    std::ifstream in(s_sets_path);
++    std::string id, state;
++    while (in >> id >> state)
++      chosen[id] = state != "off";
++  }
++  {
++    std::ifstream in(s_options_path);
++    std::string key, value;
++    while (in >> key >> value)
++      if (key == "popups")
++        s_popups = value != "off";
++  }
++
++  std::vector<std::filesystem::path> files;
++  std::error_code ec;
++  if (std::filesystem::is_directory(list, ec))
++  {
++    for (const auto& f : std::filesystem::directory_iterator(list, ec))
++      if (f.is_regular_file() && f.path().extension() == ".txt")
++        files.push_back(f.path());
++    std::sort(files.begin(), files.end());
++    std::stable_sort(files.begin(), files.end(), [](const auto& a, const auto& b) {
++      return (a.stem() == "main") > (b.stem() == "main");  // the main set comes first, the others by name
++    });
++  }
++  else
++  {
++    files.push_back(list);
++  }
++  for (const auto& f : files)
++    LoadSet(f, version, chosen);
++
++  std::ifstream saved(s_unlock_path);
++  int unlocked = 0;
++  for (std::string row; std::getline(saved, row);)
++  {
++    std::string id = row.substr(0, row.find('\t'));
++    if (id.find(':') == std::string::npos)
++      id = "main:" + id;  // unlocks saved before sets existed
++    for (Entry& e : s_entries)
++      if (e.item.id == id && !e.item.unlocked)
++      {
++        e.item.unlocked = true;
++        ++unlocked;
++      }
++  }
++  std::fprintf(stderr, "[achievements] %zu sets, %zu achievements, %d already unlocked\n", s_sets.size(),
++               s_entries.size(), unlocked);
++}
++
++void Tick()
++{
++  const auto now = Clock::now();
++  std::lock_guard lock(s_mutex);
++  if (s_entries.empty())
++    return;
++  if (s_toast_active && now - s_toast_start > std::chrono::seconds(TOAST_SECONDS))
++  {
++    s_pending.pop_front();
++    s_toast_active = false;
++  }
++  if (!s_toast_active && !s_pending.empty())
++  {
++    s_toast_active = true;
++    s_toast_start = now;
++  }
++  if (now - s_last_check < std::chrono::milliseconds(CHECK_MS))
++    return;
++  s_last_check = now;
++
++  // An entry unlocks once every term has held on two checks in a row, so a half-written value (a save
++  // being loaded, a scene changing) never counts.
++  std::vector<Entry*> fresh;
++  for (Entry& e : s_entries)
++  {
++    if (e.item.unlocked || !s_sets[e.set].enabled)
++      continue;
++    bool all = false, group = true;
++    for (const Term& t : e.terms)
++    {
++      if (t.alt)
++      {
++        all = all || group;
++        group = true;
++      }
++      group = group && Holds(t);
++    }
++    all = all || group;
++    e.streak = all ? e.streak + 1 : 0;
++    if (e.streak >= 2)
++      fresh.push_back(&e);
++  }
++  if (fresh.empty())
++    return;
++  std::filesystem::create_directories(s_unlock_path.parent_path());
++  std::ofstream saved(s_unlock_path, std::ios::app);
++  for (Entry* e : fresh)
++  {
++    e->item.unlocked = true;
++    saved << e->item.id << '\t' << std::time(nullptr) << '\n';
++  }
++  if (!s_popups)
++    return;
++  if (fresh.size() > 3)  // progress the game already had: one pop-up, not a queue of them
++    s_pending.push_back({"", std::to_string(fresh.size()) + " achievements unlocked",
++                         "From the progress already in your save", true, "trophy"});
++  else
++    for (Entry* e : fresh)
++      s_pending.push_back(e->item);
++}
++
++std::vector<Item> Snapshot()
++{
++  std::lock_guard lock(s_mutex);
++  std::vector<Item> items;
++  for (const Entry& e : s_entries)
++    if (s_sets[e.set].enabled)
++      items.push_back(e.item);
++  return items;
++}
++
++std::vector<SetInfo> Sets()
++{
++  std::lock_guard lock(s_mutex);
++  std::vector<SetInfo> info;
++  for (const Set& s : s_sets)
++    info.push_back({s.title, s.enabled, 0, 0});
++  for (const Entry& e : s_entries)
++  {
++    ++info[e.set].total;
++    info[e.set].earned += e.item.unlocked ? 1 : 0;
++  }
++  return info;
++}
++
++void ToggleSet(size_t index)
++{
++  std::lock_guard lock(s_mutex);
++  if (index >= s_sets.size())
++    return;
++  s_sets[index].enabled = !s_sets[index].enabled;
++  for (Entry& e : s_entries)
++    e.streak = 0;
++  SaveChoices();
++}
++
++bool Popups()
++{
++  std::lock_guard lock(s_mutex);
++  return s_popups;
++}
++
++void TogglePopups()
++{
++  std::lock_guard lock(s_mutex);
++  s_popups = !s_popups;
++  if (!s_popups)
++  {
++    s_pending.clear();
++    s_toast_active = false;
++  }
++  SaveChoices();
++}
++
++void ResetAll()
++{
++  std::lock_guard lock(s_mutex);
++  for (Entry& e : s_entries)
++  {
++    e.item.unlocked = false;
++    e.streak = 0;
++  }
++  s_pending.clear();
++  s_toast_active = false;
++  std::error_code ec;
++  std::filesystem::remove(s_unlock_path, ec);
++}
++
++bool CurrentToast(Item* item, float* shown_for)
++{
++  std::lock_guard lock(s_mutex);
++  if (!s_popups || !s_toast_active || s_pending.empty())
++    return false;
++  *item = s_pending.front();
++  *shown_for = std::chrono::duration<float>(Clock::now() - s_toast_start).count();
++  return true;
++}
++}  // namespace moderngekko::achievements
+--- /dev/null
++++ b/src/runtime/rumble_achievements.hpp
+@@ -0,0 +1,72 @@
++// RumbleRecomp: achievements, our own. Conditions on the game's memory, checked while it runs; no network,
++// no account. RR_ACHIEVEMENTS (set by the launcher) names a folder of sets, one text file per set; a single
++// file works as one set (main.txt is listed first, the others by name). In a set file, lines starting with "@"
++// describe the set:
++//
++//   @title Main set              shown in the menu
++//   @default on                  whether it starts switched on (default on)
++//   @versions vanilla weekend    which versions it applies to (default all)
++//
++// and every other line (not blank, not starting with "#") is one achievement, fields separated by tabs:
++//
++//   id  title  description  condition  [icon]
++//
++// The icon is drawn by the menu: rank:C (also B, A, S, EX), crown (crown:C puts a letter on it), trophy, star,
++// flame, or type:grass (fire, water, electric, ice, fighting, poison, ground, flying, psychic, bug, rock, ghost,
++// dragon, dark, steel, normal).
++//
++// A condition is one or more terms separated by ";" (all must hold); "|" separates alternatives (any group holds):
++//   count A B C D [N]            the game's progress table (see rumble_achievements.cpp): start count >= N (1)
++//   flag A B C D MASK            the same table entry: any bit of MASK set (1 is open to play, 2 has been played)
++//   dex LIST [LEVEL [MIN]]       the Collection screen: at least MIN (all) of the species in LIST (dex numbers, as in
++//                                "10" or "1-12,25") are at LEVEL (3 befriended, 2 defeated, 1 seen) or more
++//   shiny LIST [MIN]             at least MIN (1) of the species in LIST have a shiny form befriended
++//   mem8|mem16|mem32 ADDR OP V   a live value at a guest address; OP is == != >= <= > < or & (any bit of V)
++//
++// Beside the save states of each version the game keeps achievements.txt (unlocks, which are never taken back
++// except by a reset) and achievement_sets.txt (which sets are on); one folder up, achievement_options.txt holds
++// the pop-up setting for every version.
++#pragma once
++
++#include <filesystem>
++#include <string>
++#include <vector>
++
++namespace moderngekko::achievements
++{
++struct Item
++{
++  std::string id, title, text;
++  bool unlocked = false;
++  std::string icon;
++};
++
++struct SetInfo
++{
++  std::string title;
++  bool enabled = true;
++  int earned = 0, total = 0;
++};
++
++// Reads the sets (RR_ACHIEVEMENTS), the choices, and the unlocks kept for this version. Does nothing if no
++// list is set.
++void Load(const std::filesystem::path& state_directory);
++
++// Checks the switched-on sets now and then (cheap to call every frame) and queues pop-ups for new unlocks.
++void Tick();
++
++// The achievements of the switched-on sets, with unlock states, for the menu page.
++std::vector<Item> Snapshot();
++
++std::vector<SetInfo> Sets();
++void ToggleSet(size_t index);
++bool Popups();
++void TogglePopups();
++
++// Forgets every unlock for this version. The game's own save is untouched, so a save that already has the
++// progress earns them again within a second; a new save earns them afresh.
++void ResetAll();
++
++// The pop-up to show right now, if any; shown_for is how long it has been on screen, in seconds.
++bool CurrentToast(Item* item, float* shown_for);
++}  // namespace moderngekko::achievements
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -242,6 +242,7 @@
+     target_sources(moderngekko PRIVATE
+         src/runtime/dolphin_runtime.cpp
+         src/runtime/rumble_menu.cpp
++        src/runtime/rumble_achievements.cpp
+         tools/automation_protocol.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
+         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
+--- a/tools/automation_protocol.cpp
++++ b/tools/automation_protocol.cpp
+@@ -525,13 +525,14 @@
+     // Windows virtual-key codes, as the game window passes them to the in-game menu.
+     static const std::map<std::string, int, std::less<>> keys = {
+         {"escape", 0x1B}, {"up", 0x26}, {"down", 0x28}, {"left", 0x25},
+-        {"right", 0x27},  {"enter", 0x0D}, {"back", 0x08}};
++        {"right", 0x27},  {"enter", 0x0D}, {"back", 0x08},
++        {"hold", 0xE001}};  // hold: holds the confirm button for a few seconds (to test the reset page)
+     const auto key_it = values.find("key");
+     const auto found = key_it == values.end() ? keys.end() : keys.find(Trim(key_it->second));
+     if (found == keys.end())
+     {
+       if (error)
+-        *error = "menu_key requires key=escape|up|down|left|right|enter|back";
++        *error = "menu_key requires key=escape|up|down|left|right|enter|back|hold";
+       return false;
+     }
+     parsed.menu_key = found->second;

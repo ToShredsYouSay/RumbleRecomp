@@ -1,0 +1,11 @@
+--- a/src/runtime/dolphin_runtime.cpp
++++ b/src/runtime/dolphin_runtime.cpp
+@@ -1013,6 +1013,8 @@
+         if (state == Core::State::Uninitialized && m_impl->platform)
+           m_impl->platform->Stop();
+       });
++  // Test copies are driven by automation and run without focus; real play ignores input while unfocused.
++  Platform::ignore_focus_loss = !m_impl->config.automation.directory.empty();
+   // RumbleRecomp: in-game menu (HOME or Escape); save states per game version.
+   const bool menu = !m_impl->config.headless;
+   if (menu)

@@ -1,0 +1,78 @@
+--- a/Source/Core/DolphinNoGUI/Platform.h
++++ b/Source/Core/DolphinNoGUI/Platform.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <functional>
+ #include <memory>
+ #include <string>
+@@ -41,6 +42,10 @@
+   // virtual-key code) and returns true when it used the key. RequestToggleFullscreen may be called
+   // from any thread.
+   static inline std::function<bool(int)> key_hook;
++  // RumbleRecomp: the Windows window tracks focus, so keys and controllers are ignored while another window is
++  // in front (Dolphin's Background Input setting still lets them through). The runner sets this when it is
++  // driven by automation: test copies run without focus.
++  static inline bool ignore_focus_loss = false;
+   virtual void RequestToggleFullscreen() {}
+ 
+   static std::unique_ptr<Platform> CreateHeadlessPlatform();
+@@ -72,6 +77,6 @@
+   Common::Flag m_save_state_requested{false};
+   Common::Flag m_load_state_requested{false};
+ 
+-  bool m_window_focus = true;  // Should be made atomic if actually implemented
++  std::atomic<bool> m_window_focus = true;
+   bool m_window_fullscreen = false;
+ };
+--- a/Source/Core/DolphinNoGUI/PlatformWin32.cpp
++++ b/Source/Core/DolphinNoGUI/PlatformWin32.cpp
+@@ -22,6 +22,7 @@
+ #include <vector>
+ #include <windows.h>
+ #include <climits>
++#include <cstdio>
+ #include <cstdlib>
+ #include <dwmapi.h>
+ #include <thread>
+@@ -69,6 +70,7 @@
+   void RequestToggleFullscreen() override;
+   void UpdateWindowPosition();
+   void ProcessEvents();
++  void NoteFocus(bool focused);
+ 
+   HWND m_hwnd{};
+   HMENU m_menu{};
+@@ -152,7 +154,17 @@
+ 
+   ShowWindow(m_hwnd, SW_SHOW);
+   UpdateWindow(m_hwnd);
++  NoteFocus(GetForegroundWindow() == m_hwnd);
+   return true;
++}
++
++// RumbleRecomp: whether the game window is the one in front. RR_LOG_FOCUS=1 prints each change.
++void PlatformWin32::NoteFocus(bool focused)
++{
++  m_window_focus = focused || ignore_focus_loss;
++  if (std::getenv("RR_LOG_FOCUS"))
++    std::fprintf(stderr, "[focus] window %s, input %s\n", focused ? "in front" : "behind",
++                 m_window_focus ? "on" : "ignored");
+ }
+ 
+ bool PlatformWin32::CreateMenus()
+@@ -445,7 +457,12 @@
+     }
+     break;
+ 
++  case WM_SETFOCUS:
++    platform->NoteFocus(true);
++    break;
++
+   case WM_KILLFOCUS:
++    platform->NoteFocus(false);
+     // Never leave emulation running fast because Space was released while
+     // another window had focus and the key-up went elsewhere.
+     Config::SetCurrent(Config::MAIN_EMULATION_SPEED, 1.0f);

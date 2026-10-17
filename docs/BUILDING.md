@@ -31,8 +31,8 @@ Apply `patches/moderngekko/*.patch` in number order, each in the repository it b
 
 | Repository | Patches |
 |---|---|
-| `third_party/ModernGekko` | 0001, 0005, 0006, 0009, 0011, 0013, 0015, 0016, 0018, 0019 |
-| `third_party/ModernGekko/vendor/dolphin` | 0002, 0004, 0007, 0010, 0012, 0014, 0017 |
+| `third_party/ModernGekko` | 0001, 0005, 0006, 0009, 0011, 0013, 0015, 0016, 0018, 0019, 0021, 0023 |
+| `third_party/ModernGekko/vendor/dolphin` | 0002, 0004, 0007, 0010, 0012, 0014, 0017, 0022 |
 | `third_party/ModernGekko/vendor/dolphin/DolRecomp` | 0003, 0008, 0020 |
 
 For example, from the repository root:

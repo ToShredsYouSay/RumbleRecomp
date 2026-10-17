@@ -52,7 +52,7 @@ def load_ui_font():
 
 
 UI_FONT = load_ui_font()
-VERSION = '0.7.1'
+VERSION = '0.8.0'
 DATA = rr_setup.default_data_dir()
 WEEKEND_URL = 'https://projectpokemon.org/home/files/file/4256-pokemon-rumble-weekend-edition/'
 PATCH1_URL = 'https://projectpokemon.org/home/files/file/5855-unofficial-weekend-edition-v150patch1/'
@@ -211,6 +211,10 @@ def launch(game, randomizer, screen, hd=False, record=False):
                RR_MENU_COLOUR=TABS[game]['colour'],  # the in-game menu (HOME or Esc) matches the tab
                RR_MENU_SLOTS=g['profile'],  # its save slots, one folder per version
                RR_FONT_DIR=os.path.join(ROOT, 'tools', 'fonts'))  # the menu uses the launcher's Nunito
+    # the achievement sets (tools/achievements; each set file says which versions it is for)
+    sets = os.path.join(ROOT, 'tools', 'achievements')
+    if os.path.isdir(sets):
+        env['RR_ACHIEVEMENTS'] = sets
     if record:  # save every texture the game draws (Dump/Textures/WPSE01), for people making texture packs
         env['MODERNGEKKO_DUMP_TEXTURES'] = '1'
     auto = os.path.join(STATE, 'auto')

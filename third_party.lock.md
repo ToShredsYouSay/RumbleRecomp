@@ -13,6 +13,6 @@
 | `reference/rumble-decomp` (decomp: symbols, headers) | `11c112f7548b26ab2cecfcf52e201b8d3b76120f` | [KooShnoo's Rumble decompilation](https://github.com/KooShnoo/pokemon-rumble) |
 
 Patches by repository:
-- ModernGekko: 0001, 0005, 0006, 0009, 0011, 0013, 0015, 0016, 0018, and 0019
-- vendor/dolphin (RecompCore): 0002, 0004, 0007, 0010, 0012, 0014, and 0017
-- vendor/dolphin/DolRecomp: 0003 and 0008
+- ModernGekko: 0001, 0005, 0006, 0009, 0011, 0013, 0015, 0016, 0018, 0019, 0021, and 0023
+- vendor/dolphin (RecompCore): 0002, 0004, 0007, 0010, 0012, 0014, 0017, and 0022
+- vendor/dolphin/DolRecomp: 0003, 0008, and 0020

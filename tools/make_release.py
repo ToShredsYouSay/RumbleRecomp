@@ -103,8 +103,8 @@ code from RecompCore's GXRuntime (kit\\src, included as source).
 {lock}
 
 Apply order (git apply, from the repository named):
-  ModernGekko:              0001 0005 0006 0009 0011 0013 0015 0016 0018 0019
-  vendor/dolphin:           0002 0004 0007 0010 0012 0014 0017
+  ModernGekko:              0001 0005 0006 0009 0011 0013 0015 0016 0018 0019 0021 0023
+  vendor/dolphin:           0002 0004 0007 0010 0012 0014 0017 0022
   vendor/dolphin/DolRecomp: 0003 0008 0020
 """
 
@@ -150,6 +150,7 @@ def assemble(out, skip_kit=False):
     copy(os.path.join(ROOT, 'tools', 'launcher.ico'), os.path.join(out, 'tools', 'launcher.ico'))
     shutil.copytree(os.path.join(ROOT, 'tools', 'launcher_art'), os.path.join(out, 'tools', 'launcher_art'))
     shutil.copytree(os.path.join(ROOT, 'tools', 'fonts'), os.path.join(out, 'tools', 'fonts'))  # Nunito (OFL)
+    shutil.copytree(os.path.join(ROOT, 'tools', 'achievements'), os.path.join(out, 'tools', 'achievements'))
     copy(os.path.join(ROOT, 'config', 'GameSettings', 'WPSE01.ini'),
          os.path.join(out, 'config', 'GameSettings', 'WPSE01.ini'))
     # source + licences
