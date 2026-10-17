@@ -617,7 +617,7 @@
    VideoCommon::OnScreenUI::custom_draw = Draw;
 --- /dev/null
 +++ b/src/runtime/rumble_achievements.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,576 @@
 +// RumbleRecomp: achievements (see rumble_achievements.hpp).
 +//
 +// The game keeps its progress in the current save slot (a 0x1360-byte block). Its address is found through
@@ -673,6 +673,7 @@
 +  std::vector<u16> list;  // Dex: the species (dex numbers)
 +  u32 min = 1;            // Dex: how many of the list must hold
 +  bool shiny = false;     // Dex: look for a shiny befriended, not the collection status
++  bool defeats = false;   // Dex: add up the times each was defeated (at least min in all)
 +  bool alt = false;       // starts an alternative: the entry holds if any group of terms (split by "|") holds
 +};
 +
@@ -792,6 +793,12 @@
 +    {
 +      if (id >= count)
 +        continue;
++      if (t.defeats)
++      {
++        if (Read(array + id * DEX_RECORD + 0x10, 4, &v))
++          have += v;
++        continue;
++      }
 +      const bool ok = t.shiny ? Read(array + id * DEX_RECORD + 0x18, 4, &v) && v != 0 :
 +                                Read(array + id * DEX_RECORD, 4, &v) && v >= t.value;
 +      have += ok;
@@ -837,7 +844,7 @@
 +    t->value = tok[4].empty() ? 1 : std::strtoul(tok[4].c_str(), nullptr, 0);  // count: at least; flag: mask
 +    return !tok[3].empty() && t->a < 3 && t->b < 5 && t->c < 8 && t->d < 10;
 +  }
-+  if (kind == "dex" || kind == "shiny")
++  if (kind == "dex" || kind == "shiny" || kind == "defeats")
 +  {
 +    // dex LIST [LEVEL [MIN]]: at least MIN (all by default) of LIST ("10", "1-12,25") are at LEVEL (3, befriended)
 +    // or more. shiny LIST [MIN]: at least MIN (1) of LIST have a shiny form befriended.
@@ -845,6 +852,7 @@
 +    in >> list >> a >> b;
 +    t->kind = Term::Dex;
 +    t->shiny = kind == "shiny";
++    t->defeats = kind == "defeats";
 +    std::istringstream items(list);
 +    std::string item;
 +    while (std::getline(items, item, ','))
@@ -859,7 +867,7 @@
 +    }
 +    if (t->list.empty())
 +      return false;
-+    if (t->shiny)
++    if (t->shiny || t->defeats)
 +      t->min = a.empty() ? 1 : std::strtoul(a.c_str(), nullptr, 0);
 +    else
 +    {
@@ -1188,7 +1196,7 @@
 +}  // namespace moderngekko::achievements
 --- /dev/null
 +++ b/src/runtime/rumble_achievements.hpp
-@@ -0,0 +1,72 @@
+@@ -0,0 +1,73 @@
 +// RumbleRecomp: achievements, our own. Conditions on the game's memory, checked while it runs; no network,
 +// no account. RR_ACHIEVEMENTS (set by the launcher) names a folder of sets, one text file per set; a single
 +// file works as one set (main.txt is listed first, the others by name). In a set file, lines starting with "@"
@@ -1212,6 +1220,7 @@
 +//   dex LIST [LEVEL [MIN]]       the Collection screen: at least MIN (all) of the species in LIST (dex numbers, as in
 +//                                "10" or "1-12,25") are at LEVEL (3 befriended, 2 defeated, 1 seen) or more
 +//   shiny LIST [MIN]             at least MIN (1) of the species in LIST have a shiny form befriended
++//   defeats LIST [MIN]           the species in LIST have been defeated MIN (1) times in all, added together
 +//   mem8|mem16|mem32 ADDR OP V   a live value at a guest address; OP is == != >= <= > < or & (any bit of V)
 +//
 +// Beside the save states of each version the game keeps achievements.txt (unlocks, which are never taken back

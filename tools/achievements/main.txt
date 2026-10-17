@@ -16,7 +16,7 @@
 #
 # Not seen in any save yet, so these follow the pattern (winning a rank opens the next entry) and are unproven: the
 # Rank S Royale (D5, or the Another tier opening, A1) and the Another tier (A 1: its Rank C to S royales, and EX
-# opening as A 2) .
+# opening as A 2), the Another areas (A 1) and the EX stages (A 2, stage k clears when D k+1 opens).
 royale_c	Rank C Royale	Clear the Normal Rank C Battle Royale	flag 0 1 7 2 1	crown:C
 royale_b	Rank B Royale	Clear the Normal Rank B Battle Royale	flag 0 1 7 3 1	crown:B
 royale_a	Rank A Royale	Clear the Normal Rank A Battle Royale	flag 0 1 7 4 1	crown:A
@@ -49,3 +49,31 @@ cave_s	Rocky Cave Rank S	Step up to Rank S in Rocky Cave	count 0 4 3 1	rank:S
 furnace_s	Fiery Furnace Rank S	Step up to Rank S in Fiery Furnace	count 0 4 4 1	rank:S
 beach_s	Bright Beach Rank S	Step up to Rank S in Bright Beach	count 0 4 5 1	rank:S
 tower_s	Eternal Tower Rank S	Step up to Rank S in Eternal Tower	count 0 4 6 1	rank:S
+another_forest_c	Another Silent Forest Rank C	Reach Rank C in Silent Forest in Another mode	count 1 1 1 1	rank:C
+another_prairie_c	Another Windy Prairie Rank C	Reach Rank C in Windy Prairie in Another mode	count 1 1 2 1	rank:C
+another_cave_c	Another Rocky Cave Rank C	Reach Rank C in Rocky Cave in Another mode	count 1 1 3 1	rank:C
+another_furnace_c	Another Fiery Furnace Rank C	Reach Rank C in Fiery Furnace in Another mode	count 1 1 4 1	rank:C
+another_beach_c	Another Bright Beach Rank C	Reach Rank C in Bright Beach in Another mode	count 1 1 5 1	rank:C
+another_tower_c	Another Eternal Tower Rank C	Reach Rank C in Eternal Tower in Another mode	count 1 1 6 1	rank:C
+another_forest_b	Another Silent Forest Rank B	Reach Rank B in Silent Forest in Another mode	count 1 2 1 1	rank:B
+another_prairie_b	Another Windy Prairie Rank B	Reach Rank B in Windy Prairie in Another mode	count 1 2 2 1	rank:B
+another_cave_b	Another Rocky Cave Rank B	Reach Rank B in Rocky Cave in Another mode	count 1 2 3 1	rank:B
+another_furnace_b	Another Fiery Furnace Rank B	Reach Rank B in Fiery Furnace in Another mode	count 1 2 4 1	rank:B
+another_beach_b	Another Bright Beach Rank B	Reach Rank B in Bright Beach in Another mode	count 1 2 5 1	rank:B
+another_tower_b	Another Eternal Tower Rank B	Reach Rank B in Eternal Tower in Another mode	count 1 2 6 1	rank:B
+another_forest_a	Another Silent Forest Rank A	Reach Rank A in Silent Forest in Another mode	count 1 3 1 1	rank:A
+another_prairie_a	Another Windy Prairie Rank A	Reach Rank A in Windy Prairie in Another mode	count 1 3 2 1	rank:A
+another_cave_a	Another Rocky Cave Rank A	Reach Rank A in Rocky Cave in Another mode	count 1 3 3 1	rank:A
+another_furnace_a	Another Fiery Furnace Rank A	Reach Rank A in Fiery Furnace in Another mode	count 1 3 4 1	rank:A
+another_beach_a	Another Bright Beach Rank A	Reach Rank A in Bright Beach in Another mode	count 1 3 5 1	rank:A
+another_tower_a	Another Eternal Tower Rank A	Reach Rank A in Eternal Tower in Another mode	count 1 3 6 1	rank:A
+another_forest_s	Another Silent Forest Rank S	Reach Rank S in Silent Forest in Another mode	count 1 4 1 1	rank:S
+another_prairie_s	Another Windy Prairie Rank S	Reach Rank S in Windy Prairie in Another mode	count 1 4 2 1	rank:S
+another_cave_s	Another Rocky Cave Rank S	Reach Rank S in Rocky Cave in Another mode	count 1 4 3 1	rank:S
+another_furnace_s	Another Fiery Furnace Rank S	Reach Rank S in Fiery Furnace in Another mode	count 1 4 4 1	rank:S
+another_beach_s	Another Bright Beach Rank S	Reach Rank S in Bright Beach in Another mode	count 1 4 5 1	rank:S
+another_tower_s	Another Eternal Tower Rank S	Reach Rank S in Eternal Tower in Another mode	count 1 4 6 1	rank:S
+ex_1	EX Battle Royale 1	Clear stage 1 of the EX Battle Royale	flag 2 1 7 2 1	rank:EX
+ex_2	EX Battle Royale 2	Clear stage 2 of the EX Battle Royale	flag 2 1 7 3 1	rank:EX
+ex_3	EX Battle Royale 3	Clear stage 3 of the EX Battle Royale	flag 2 1 7 4 1	rank:EX
+ex_4	EX Battle Royale 4	Clear stage 4 of the EX Battle Royale	flag 2 1 7 5 1	rank:EX
