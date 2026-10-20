@@ -1,4 +1,4 @@
-// RumbleRecomp: widescreen HUD anchoring for Pokémon Rumble (WPSE01), compiled into the
+// RumbleRecomp: widescreen HUD anchoring for Monster Rumble (WPSE01), compiled into the
 // recompiled game module (RECOMPCORE_MODULE_EXTRA_SOURCES) and called from a DolRecomp
 // instruction hook (DOLRECOMP_HOOKS=802A52F4:rr_hook_lyt_pane_translate).
 //
@@ -156,7 +156,7 @@ void rr_hook_view_frustum(CPUState* ctx)
 }
 
 // ---------------------------------------------------------------------------------------
-// Native-aspect scenes. The "Pokémon You Have Befriended" results screen (gameresult.brlyt)
+// Native-aspect scenes. The "Monsters You Have Befriended" results screen (gameresult.brlyt)
 // and the Ranking screen (ranking.brlyt) are small 3D rooms with nothing built beyond their
 // 16:9 walls. While one of their layouts is being laid out, raise a flag; the runtime polls
 // it and has the presenter show that scene at 16:9 with blurred side panels.
@@ -186,7 +186,7 @@ static void detect_native_scene(CPUState* ctx, u32 root_pane)
     }
 }
 
-// battleroyal.brlyt has no "root" pane: its two widgets, ENEMY (Pokémon remaining) and
+// battleroyal.brlyt has no "root" pane: its two widgets, ENEMY (Monster remaining) and
 // TIME, hang directly off RootPane, both in the top-right corner.
 static int battleroyal_side(CPUState* ctx, u32 pane, u32 root_pane)
 {
@@ -375,7 +375,7 @@ void rr_hook_picture_drawn(CPUState* ctx)
 }
 
 // ---------------------------------------------------------------------------------------
-// Weekend Edition wild-Pokémon randomizer (native port of the community Gecko code
+// Weekend Edition wild-monster randomizer (native port of the community Gecko code
 // C2159AD0, see docs/reference/WEEKEND_RANDOMIZER_CHEAT.md). Hook at 0x80159AD0 inside
 // NewPPD, immediately before `mr r28, r3` where r3 points at the spawn's entry in the
 // 28-byte-stride table at 0x8035DF88. Unless the encounter is scripted (word at r30+0x20 ==

@@ -132,7 +132,7 @@ def apply_xdelta(source_path, patch_path, out_path):
 
 
 # ---- unpacking ----------------------------------------------------------------------------------------
-def unpack_game_code(wad, gameroot, dol_sha1, title='Poke Rumble'):
+def unpack_game_code(wad, gameroot, dol_sha1, title='Monster Rumble'):
     """Write <gameroot>/sys/main.dol (the WAD's boot content, decompressed) and a minimal sys/boot.bin
     (game ID + Wii magic + title), which is all the compiler and runner use to identify the game."""
     sys_dir = os.path.join(gameroot, 'sys')

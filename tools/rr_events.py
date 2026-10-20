@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare short frame dips around gameplay events (enemies turning into drops, the Pokémon swap after a
+"""Compare short frame dips around gameplay events (enemies turning into drops, the monster swap after a
 knockout) between the recomp and Dolphin's own JIT on the same savestate.
 
 Loads a savestate, then for N seconds attacks (J/K) while nudging toward the enemies with real keystrokes,

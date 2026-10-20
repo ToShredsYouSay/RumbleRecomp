@@ -53,7 +53,7 @@ switch ($Step) {
     # RECOMPCORE_MODULE_EXTRA_SOURCES; tools\rr_compile.py shows how).
     # 0006 adds MODERNGEKKO_DUMP_TEXTURES=1 (texture dumping for texture packs).
     # 0004/0005 fix the 0xC000041D exit crash (window destroyed after Config::Shutdown).
-    # 0002/0003 are the multi-Poke performance work; the shipped
+    # 0002/0003 are the multi-Monster performance work; the shipped
     # module is then built with PGO: see tools\rr_pgo_train.py for the pgo-run command and training.
     cmake -S third_party\ModernGekko -B build\mg -G Ninja -DCMAKE_BUILD_TYPE=Release "-DMODERNGEKKO_RUN_ICON=$root\tools\launcher.ico" "-DCMAKE_TOOLCHAIN_FILE=$root\tools\toolchain-llvm-mingw.cmake"
   }
@@ -62,7 +62,7 @@ switch ($Step) {
     # Synthetic disc-style root: only sys\main.dol + sys\boot.bin are used to identify the game and build the module.
     New-Item -ItemType Directory -Force build\gameroot\vanilla\sys, build\gameroot\vanilla\files | Out-Null
     Copy-Item extracted\WPSE01_01\main.dol build\gameroot\vanilla\sys\main.dol -Force
-    python -c "import struct;b=bytearray(0x440);b[0:6]=b'WPSE01';struct.pack_into('>I',b,0x18,0x5D1C9EA3);b[0x20:0x2B]=b'Poke Rumble';open('build/gameroot/vanilla/sys/boot.bin','wb').write(b)"
+    python -c "import struct;b=bytearray(0x440);b[0:6]=b'WPSE01';struct.pack_into('>I',b,0x18,0x5D1C9EA3);b[0x20:0x2E]=b'Monster Rumble';open('build/gameroot/vanilla/sys/boot.bin','wb').write(b)"
     .\build\mg\moderngekko-port.exe build build\gameroot\vanilla --backend c --toolchain clang --opt-level 1 --output build\module\gWPSE01_recomp.dll
     New-Item -ItemType Directory -Force build\bin | Out-Null
     Get-ChildItem build\module -Recurse -Filter gWPSE01_recomp.dll -File | Select-Object -First 1 | Copy-Item -Destination build\bin\gWPSE01_recomp.dll -Force

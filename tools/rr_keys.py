@@ -8,7 +8,7 @@ import ctypes, time
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL('user32', use_last_error=True)
-TITLE_PREFIX = 'ModernGekko - Poke'  # matches older set-ups too
+TITLE_PREFIX = 'ModernGekko - '  # matches older set-ups too
 
 # name -> (scancode, extended)
 SC = {'J': (0x24, 0), 'K': (0x25, 0), 'L': (0x26, 0), 'I': (0x17, 0), 'W': (0x11, 0), 'A': (0x1E, 0),
