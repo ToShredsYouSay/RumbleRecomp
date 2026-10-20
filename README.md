@@ -16,9 +16,9 @@ plays at full speed with modern extras such as widescreen, save states, and text
 - **Any screen shape:** fit to window, 16:9 (the original), 21:9, or 32:9, with the HUD kept in proportion.
 - **In-game menu** on HOME or Esc: save and load states (4 slots per version, each with a picture and the time),
   achievements, fullscreen, and quit.
-- **Achievements:** our own, offline (nothing connects to any service). Battle Royale ranks and each area's ranks, 
-  plus an optional collection challenge named by dex number. Pick which sets are on, turn pop-ups off, or reset
-  from the pause menu.
+- **Achievements:** our own, offline (nothing connects to any service). Battle Royale ranks, each area's ranks,
+  defeat milestones, and optional collection and shiny challenges named by dex number. Pick which sets are on,
+  turn pop-ups off, or reset from the pause menu.
 - **Controllers:** press any button to join, up to four players, with full analogue movement for everyone. The
   keyboard is always player 1. The game ignores keys and buttons while another window is in front.
 - **Weekend Edition 1.5 and PATCH1,** the fan-made expansions, built from your own copies of their patches. An

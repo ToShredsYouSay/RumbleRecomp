@@ -22,7 +22,7 @@ body:
     attributes:
       label: RumbleRecomp version
       description: Shown next to the name at the top of the launcher.
-      placeholder: Beta 0.8.1
+      placeholder: Beta 0.8.2
     validations:
       required: true
   - type: textarea
