@@ -285,11 +285,11 @@ index cfcd706..643ecb0 100644
 --- a/Source/Core/VideoCommon/VertexShaderManager.cpp
 +++ b/Source/Core/VideoCommon/VertexShaderManager.cpp
 @@ -113,9 +113,13 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
-     // HUD) use those, while full-screen composites of off-screen passes (e.g. monsters
+     // HUD) use those, while full-screen composites of off-screen passes (e.g. Pokémon
      // Rumble's character outlines) use a 0..width projection and must keep covering the
      // whole screen.
 +    // Only layout-sized spaces qualify (half-width >= 100 units, i.e. |raw[0]| <= 0.01): HUD
-+    // layouts are authored in screen-pixel-like units (Monster Rumble: +-324). Full-screen
++    // layouts are authored in screen-pixel-like units (Poke Rumble: +-324). Full-screen
 +    // composites drawn in a unit square (+-0.5: the stage-clear zoom snapshot, the pause
 +    // dimming) are already the full window's shape and must keep covering it.
      if (g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&

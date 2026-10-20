@@ -2,7 +2,7 @@
 
 Good news, everyone!
 
-RumbleRecomp turns your own copy of the 2009 WiiWare game *Monster Rumble* into a native Windows program. The
+RumbleRecomp turns your own copy of the 2009 WiiWare game *Poke Rumble* into a native Windows program. The
 game's code is translated into C and compiled on your own PC, then runs on a trimmed-down Dolphin runtime, so it
 plays at full speed with modern extras such as widescreen, save states, and texture packs.
 

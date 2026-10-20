@@ -11,7 +11,7 @@ def window_title():
         n = user32.GetWindowTextLengthW(hwnd)
         if n and user32.IsWindowVisible(hwnd):
             b = ctypes.create_unicode_buffer(n + 1); user32.GetWindowTextW(hwnd, b, n + 1)
-            if b.value.startswith('ModernGekko - '): found.append(b.value)
+            if b.value.startswith('ModernGekko - Poke'): found.append(b.value)
         return True
     user32.EnumWindows(cb, 0)
     return found[0] if found else ''

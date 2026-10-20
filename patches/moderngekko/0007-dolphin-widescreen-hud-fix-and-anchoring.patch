@@ -259,7 +259,7 @@ index 6d69803..cfcd706 100644
 +    // textures rendered into square viewports) must stay untouched. The factor tracks
 +    // the window/custom aspect live, so fit-to-window resizing is covered too.
 +    // Only horizontally centred projections (left == -right) qualify: NW4R layouts (the
-+    // HUD) use those, while full-screen composites of off-screen passes (e.g. monsters
++    // HUD) use those, while full-screen composites of off-screen passes (e.g. Pokémon
 +    // Rumble's character outlines) use a 0..width projection and must keep covering the
 +    // whole screen.
 +    if (g_ActiveConfig.bWidescreenHack && g_ActiveConfig.bWidescreenHackHUDFix &&
